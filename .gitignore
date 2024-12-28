@@ -1,2 +1,4 @@
 # ignore any pycache directories
 __pycache__/
+
+.history/
