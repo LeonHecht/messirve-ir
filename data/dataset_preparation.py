@@ -1,5 +1,12 @@
 from transformers import AutoTokenizer
 from datasets import Dataset
+from datasets import load_dataset
+
+
+def load_messirve_dataset(country="ar"):
+    ds = load_dataset("spanish-ir/messirve", country)
+    return ds
+
 
 def prepare_dataset(data, tokenizer):
     """
