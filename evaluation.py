@@ -63,7 +63,7 @@ def run(model, metrics):
     docs = ds["test"]["docid_text"]
     queries = ds["test"]["query"]
     doc_ids = ds["test"]["docid"]
-    doc_id_set = set(doc_ids)   # (len=3829) There are duplicates, so it seems as if on doc is the answer for several queries
+    doc_id_set = set(doc_ids)   # (len=3829) There are duplicates, so it seems as if one doc is the answer for several queries
     query_ids = ds["test"]["id"]
     print("Data prepared.")
 
