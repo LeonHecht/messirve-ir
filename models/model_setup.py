@@ -1,6 +1,6 @@
 from transformers import AutoModel
 
-def load_model(model_name="bert-base-uncased"):
+def load_model(checkpoint="bert-base-uncased"):
     """
     Loads a Hugging Face transformer model.
 
@@ -10,7 +10,5 @@ def load_model(model_name="bert-base-uncased"):
     Returns:
         model: Hugging Face model instance.
     """
-    model = AutoModel.from_pretrained(model_name)
+    model = AutoModel.from_pretrained(checkpoint)
     return model
-
-model = load_model()
