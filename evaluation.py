@@ -10,8 +10,8 @@ def load_model(checkpoint):
     return model_setup.load_model(checkpoint)
 
 
-def load_data(data):
-    ds = dataset_preparation.load_messirve_dataset(country="ar")
+def load_data(country):
+    ds = dataset_preparation.load_messirve_dataset(country)
     return ds
 
 
