@@ -6,3 +6,6 @@ __pycache__/
 *.pkl
 
 .vscode/
+
+# ignore any file inside corpus directory
+corpus/*
