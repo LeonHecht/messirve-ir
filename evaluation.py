@@ -5,6 +5,7 @@ import pickle
 import os
 import pytrec_eval
 import numpy as np
+import torch
 
 # Globals
 MAX_QUERY_LEN = 256
@@ -14,9 +15,15 @@ MAX_DOC_LEN = 2048
 def get_bge_m3_model(checkpoint):
     """ Load BAAI embeddings model."""
     from FlagEmbedding import BGEM3FlagModel
-
     # model = BGEM3FlagModel(checkpoint, use_fp16=True) # Setting use_fp16 to True speeds up computation with a slight performance degradation
     model = BGEM3FlagModel(checkpoint) # Setting use_fp16 to True speeds up computation with a slight performance degradation
+    return model
+
+
+def get_jinja_model():
+    """ Load Jinja embeddings model."""
+    from transformers import AutoModel
+    model = AutoModel.from_pretrained("jinaai/jina-embeddings-v3", trust_remote_code=True)
     return model
 
 
@@ -67,6 +74,39 @@ def retrieve(query_ids, doc_ids, embeddings_queries, embeddings_docs, sim_type='
     return run
 
 
+def embed_jinja(model, docs, queries, doc_ids, query_ids):
+    """
+    Embed the queries and documents using the Jinja embeddings model and compute the similarity between queries and documents.
+    Calls the retrieve function.
+
+    Args:
+        model: Jinja embeddings model.
+        docs (dict): Dictionary with document_id as key and text as value.
+        queries (list): List of queries.
+        top_k (int): Number of most similar documents to retrieve.
+    
+    Returns:
+        dict: Dictionary with query as key and a list of tuples of (similarity, document text, doc_id) as value.
+    """
+    # When calling the `encode` function, you can choose a `task` based on the use case:
+    # 'retrieval.query', 'retrieval.passage', 'separation', 'classification', 'text-matching'
+    # Alternatively, you can choose not to pass a `task`, and no specific LoRA adapter will be used.
+    embeddings_queries = model.encode(queries, task="retrieval.query", max_length=MAX_QUERY_LEN)
+    path = 'corpus/embeddings_corpus_jinja.npy'
+
+    if not os.path.exists(path):
+        embeddings_docs = model.encode(docs, task="retrieval.passage", max_length=MAX_DOC_LEN)
+        # save embeddings
+        np.save(path, embeddings_docs)
+    else:
+        # Load embeddings
+        embeddings_docs = np.load(path)
+
+    # Compute similarities
+    run = retrieve(query_ids, doc_ids, embeddings_queries, embeddings_docs)
+    return run
+
+
 def embed_bge(model, docs, queries, doc_ids, query_ids):
     """
     Embed the queries and documents using the BAAI embeddings models and compute the similarity between queries and documents.
@@ -78,7 +118,7 @@ def embed_bge(model, docs, queries, doc_ids, query_ids):
         queries (list): List of queries.
         top_k (int): Number of most similar documents to retrieve.
 
-    Returns:   
+    Returns:
         dict: Dictionary with query as key and a list of tuples of (similarity, document text, doc_id) as value.
     """
     embeddings_queries = model.encode(queries, batch_size=8, max_length=MAX_QUERY_LEN)['dense_vecs']
@@ -145,6 +185,8 @@ def run(model, metrics, country):
     query_ids = ds["test"]["id"]
     print("Data prepared.")
 
+    device = torch.device("cuda")
+
     if model == "bm25":
         run_path = f"run_bm25_{country}.pkl"
         if not os.path.exists(run_path):
@@ -165,6 +207,19 @@ def run(model, metrics, country):
             # checkpoint = 'BAAI/bge-m3-retromae'
             model = get_bge_m3_model(checkpoint)
             run = embed_bge(model, docs, queries, doc_ids, query_ids)
+            # save run to disk using pickle
+            with open(run_path, "wb") as f:
+                print("Dumping run to pickle file...")
+                pickle.dump(run, f)
+        else:
+            with open(run_path, "rb") as f:
+                run = pickle.load(f)
+    elif model == "jinja":
+        run_path = f"run_jinja_{country}.pkl"
+        if not os.path.exists(run_path):
+            model = get_jinja_model()
+            model.to(device)
+            run = embed_jinja(model, docs, queries, doc_ids, query_ids)
             # save run to disk using pickle
             with open(run_path, "wb") as f:
                 print("Dumping run to pickle file...")
@@ -208,4 +263,5 @@ def run(model, metrics, country):
 
 if __name__ == "__main__":
     # run(model="bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
-    run(model="bge", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
+    # run(model="bge", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
+    run(model="jinja", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
