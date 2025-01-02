@@ -29,12 +29,9 @@ def retrieve_bm25(docs, queries, doc_ids, query_ids):
         dict: Dictionary with (query_id, doc_id) as key and a list of tuples of score as value.
     """
     from rank_bm25 import BM25Okapi
-    import numpy as np
-
-    texts = docs
 
     # Simple space-based tokenization
-    tokenized_corpus = [text.lower().split() for text in texts]
+    tokenized_corpus = [doc.lower().split() for doc in docs]
 
     # Create BM25 model
     bm25 = BM25Okapi(tokenized_corpus)
@@ -43,39 +40,40 @@ def retrieve_bm25(docs, queries, doc_ids, query_ids):
     tokenized_queries = [query.lower().split() for query in queries]
 
     # key: query, value: (similarity, text, doc_id)
-    qrels = {}
+    run = {}
     for tokenized_query, query_id in tqdm(zip(tokenized_queries, query_ids), total=len(tokenized_queries)):
         # Calcular las puntuaciones BM25 para la consulta en cada documento
         scores = bm25.get_scores(tokenized_query)
 
-        # Ordenar los documentos por relevancia
-        # sorted_docs = np.argsort(scores)[::-1]  # Orden descendente
-        for i, score in enumerate(scores):
-            qrels[(query_id, doc_ids[i])] = score
-    return qrels
+        run_query = {}
+        for doc_id, score in zip(doc_ids, scores):
+            run_query[str(doc_id)] = score
+        run[str(query_id)] = run_query
+    return run
 
 
-def run(model, metrics):
+def run(model, metrics, country):
     import sys
     print("Executable: ", sys.executable)
 
-    ds = load_data("ar")
+    ds = load_data(country)
     docs = ds["test"]["docid_text"]
     queries = ds["test"]["query"]
     doc_ids = ds["test"]["docid"]
-    doc_id_set = set(doc_ids)   # (len=3829) There are duplicates, so it seems as if one doc is the answer for several queries
     query_ids = ds["test"]["id"]
     print("Data prepared.")
 
-    if model == "bm25":    
-        if not os.path.exists("qrels_bm25.pkl"):
-            qrels_model = retrieve_bm25(docs, queries, doc_ids, query_ids)
+    if model == "bm25":
+        run_path = f"run_bm25_{country}.pkl"
+        if not os.path.exists(run_path):
+            run = retrieve_bm25(docs, queries, doc_ids, query_ids)
             # save qrels_model to disk using pickle
-            with open("qrels_bm25.pkl", "wb") as f:
-                pickle.dump(qrels_model, f)
+            with open(run_path, "wb") as f:
+                print("Dumping run to pickle file...")
+                pickle.dump(run, f)
         else:
-            with open("qrels_bm25.pkl", "rb") as f:
-                qrels_model = pickle.load(f)
+            with open(run_path, "rb") as f:
+                run = pickle.load(f)
         print("BM25 retrieval done.")
     else:
         raise ValueError("Model not supported.")
@@ -84,17 +82,12 @@ def run(model, metrics):
     # qrels = {query_id: {doc_id: relevance, ...},
     #          query_id: {doc_id: relevance, ...}, ...},
     qrels = {}
-    run = {}
     for query_id, rel_doc_id in zip(query_ids, doc_ids):
-        qrel_dict = {str(rel_doc_id): 1}
-        run_dict = {}
-        for doc_id in doc_id_set:
-            run_dict[str(doc_id)] = qrels_model[(query_id, doc_id)]
-            if doc_id != doc_id:
-                qrel_dict[str(doc_id)] = 0
-        qrels[str(query_id)] = qrel_dict
-        run[str(query_id)] = run_dict
-    print("Qrels and runs prepared.")
+        # put all qrels to 0
+        qrels[str(query_id)] = {str(doc_id): 0 for doc_id in doc_ids}
+        # set the qrel for the relevant doc to 1 (assuming 1 relevant doc per query)
+        qrels[str(query_id)][str(rel_doc_id)] = 1
+    print("Qrels prepared.")
 
     evaluator = pytrec_eval.RelevanceEvaluator(qrels, metrics)
     results = evaluator.evaluate(run)
@@ -117,4 +110,4 @@ def run(model, metrics):
 
 
 if __name__ == "__main__":
-    run(model="bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'})
+    run(model="bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
