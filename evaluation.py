@@ -1,3 +1,5 @@
+import sys
+print("Executable: ", sys.executable)
 from models import model_setup
 from data import dataset_preparation
 from tqdm import tqdm
@@ -25,6 +27,16 @@ def get_jinja_model():
     from transformers import AutoModel
     model = AutoModel.from_pretrained("jinaai/jina-embeddings-v3", trust_remote_code=True)
     return model
+
+
+def get_mamba_model():
+    """ Load Mamba embeddings model."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    # load model from
+    path = "/home/leon/tesis/mamba-ir/results_300M_diverse_shuffle_75train/mamba-130m-spanish-legal-300M-tokens-diverse"
+    model = AutoModelForCausalLM.from_pretrained(path)
+    tokenizer = AutoTokenizer.from_pretrained(path)
+    return model, tokenizer
 
 
 def load_data(country):
@@ -137,6 +149,72 @@ def embed_bge(model, docs, queries, doc_ids, query_ids):
     return run
 
 
+def embed_mamba(model, tokenizer, docs, queries, doc_ids, query_ids):
+    from torch.utils.data import DataLoader, TensorDataset
+    batch_size = 8
+    device = next(model.parameters()).device  # Automatically detect model's device
+    print("Device: ", device)
+
+    inputs_docs = tokenizer(
+        docs,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=MAX_DOC_LEN
+    )
+    inputs_queries = tokenizer(
+        queries,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=MAX_QUERY_LEN
+    )
+    print("Docs and queries tokenized.")
+    inputs_docs = {key: tensor.to(device) for key, tensor in inputs_docs.items()}  # Move to device
+    inputs_queries = {key: tensor.to(device) for key, tensor in inputs_queries.items()}  # Move to device
+
+    # eos_token_id = tokenizer.eos_token_id
+    # eos_tokens = torch.full((inputs_docs["input_ids"].size(0), 1), eos_token_id, dtype=torch.long).to(device)
+    # attention_tokens = torch.ones((inputs_docs["attention_mask"].size(0), 1), dtype=torch.long).to(device)
+
+    # inputs_docs["input_ids"] = torch.cat([inputs_docs["input_ids"], eos_tokens], dim=1)
+    # inputs_docs["attention_mask"] = torch.cat([inputs_docs["attention_mask"], attention_tokens], dim=1)    
+
+    # eos_token_id = tokenizer.eos_token_id
+    # eos_tokens = torch.full((inputs_queries["input_ids"].size(0), 1), eos_token_id, dtype=torch.long).to(device)
+    # attention_tokens = torch.ones((inputs_queries["attention_mask"].size(0), 1), dtype=torch.long).to(device)
+
+    # inputs_queries["input_ids"] = torch.cat([inputs_queries["input_ids"], eos_tokens], dim=1)
+    # inputs_queries["attention_mask"] = torch.cat([inputs_queries["attention_mask"], attention_tokens], dim=1)
+    
+    # Create DataLoaders for batching
+    doc_dataset = TensorDataset(inputs_docs["input_ids"], inputs_docs["attention_mask"])
+    query_dataset = TensorDataset(inputs_queries["input_ids"], inputs_queries["attention_mask"])
+    doc_loader = DataLoader(doc_dataset, batch_size=batch_size)
+    query_loader = DataLoader(query_dataset, batch_size=batch_size)
+
+    print("Embedding docs and queries...")
+    embeddings_docs = []
+    with torch.no_grad():
+        for input_ids, attention_mask in tqdm(doc_loader):
+            batch = {"input_ids": input_ids.to(device), "attention_mask": attention_mask.to(device)}
+            output = model(**batch)
+            embeddings_docs.append(output.logits.mean(dim=1))  # Mean pooling
+    embeddings_docs = torch.cat(embeddings_docs, dim=0)  # Combine batches
+
+    embeddings_queries = []
+    with torch.no_grad():
+        for input_ids, attention_mask in tqdm(query_loader):
+            batch = {"input_ids": input_ids.to(device), "attention_mask": attention_mask.to(device)}
+            output = model(**batch)
+            embeddings_queries.append(output.logits.mean(dim=1))  # Mean pooling
+    embeddings_queries = torch.cat(embeddings_queries, dim=0)  # Combine batches
+    print("Embeddings done.")
+
+    run = retrieve(query_ids, doc_ids, embeddings_queries, embeddings_docs)
+    return run
+
+
 def retrieve_bm25(docs, queries, doc_ids, query_ids):
     """
     Embed the queries and documents using the BM25 model and compute the similarity between queries and documents.
@@ -227,6 +305,19 @@ def run(model, metrics, country):
         else:
             with open(run_path, "rb") as f:
                 run = pickle.load(f)
+    elif model == "mamba":
+        run_path = f"run_mamba_{country}.pkl"
+        if not os.path.exists(run_path):
+            model, tokenizer = get_mamba_model()
+            model.to(device)
+            run = embed_mamba(model, tokenizer, docs, queries, doc_ids, query_ids)
+            # save run to disk using pickle
+            with open(run_path, "wb") as f:
+                print("Dumping run to pickle file...")
+                pickle.dump(run, f)
+        else:
+            with open(run_path, "rb") as f:
+                run = pickle.load(f)
     else:
         raise ValueError("Model not supported.")
     
@@ -264,4 +355,5 @@ def run(model, metrics, country):
 if __name__ == "__main__":
     # run(model="bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
     # run(model="bge", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
-    run(model="jinja", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
+    # run(model="jinja", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
+    run(model="mamba", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
