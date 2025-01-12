@@ -1,7 +1,7 @@
 import sys
 print("Executable: ", sys.executable)
 from models import model_setup
-from data import dataset_preparation
+from datasets import load_dataset
 from tqdm import tqdm
 import pickle
 import os
@@ -27,21 +27,6 @@ def get_jinja_model():
     from transformers import AutoModel
     model = AutoModel.from_pretrained("jinaai/jina-embeddings-v3", trust_remote_code=True)
     return model
-
-
-def get_mamba_model():
-    """ Load Mamba embeddings model."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    # load model from
-    path = "/home/leon/tesis/mamba-ir/results_300M_diverse_shuffle_75train/mamba-130m-spanish-legal-300M-tokens-diverse"
-    model = AutoModelForCausalLM.from_pretrained(path)
-    tokenizer = AutoTokenizer.from_pretrained(path)
-    return model, tokenizer
-
-
-def load_data(country):
-    ds = dataset_preparation.load_messirve_dataset(country)
-    return ds
 
 
 def retrieve(query_ids, doc_ids, embeddings_queries, embeddings_docs, sim_type='dot'):
@@ -253,10 +238,7 @@ def retrieve_bm25(docs, queries, doc_ids, query_ids):
 
 
 def run(model, metrics, country):
-    import sys
-    print("Executable: ", sys.executable)
-
-    ds = load_data(country)
+    ds = load_dataset("spanish-ir/messirve", country)
     docs = ds["test"]["docid_text"]
     queries = ds["test"]["query"]
     doc_ids = ds["test"]["docid"]
@@ -308,7 +290,7 @@ def run(model, metrics, country):
     elif model == "mamba":
         run_path = f"run_mamba_{country}.pkl"
         if not os.path.exists(run_path):
-            model, tokenizer = get_mamba_model()
+            model, tokenizer = model_setup.get_mamba_model()
             model.to(device)
             run = embed_mamba(model, tokenizer, docs, queries, doc_ids, query_ids)
             # save run to disk using pickle
