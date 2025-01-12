@@ -13,3 +13,11 @@ corpus/*
 results/
 
 logs/
+
+cache/
+
+test_encoder_only_m3_bge-m3_sd/
+
+ds_stage0.json
+
+messirve.json
