@@ -1,14 +1,19 @@
 from transformers import AutoModel
 
-def load_model(checkpoint="bert-base-uncased"):
-    """
-    Loads a Hugging Face transformer model.
+def get_mamba_model():
+    """ Load Mamba embeddings model."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    # load model from
+    path = "/home/leon/tesis/mamba-ir/results_300M_diverse_shuffle_75train/mamba-130m-spanish-legal-300M-tokens-diverse"
+    model = AutoModelForCausalLM.from_pretrained(path)
+    tokenizer = AutoTokenizer.from_pretrained(path)
+    return model, tokenizer
 
-    Args:
-        model_name (str): Name of the pretrained model.
 
-    Returns:
-        model: Hugging Face model instance.
-    """
-    model = AutoModel.from_pretrained(checkpoint)
-    return model
+def get_xlm_roberta_model():
+    # Load model directly
+    from transformers import AutoTokenizer, AutoModelForMaskedLM
+
+    tokenizer = AutoTokenizer.from_pretrained("FacebookAI/xlm-roberta-base")
+    model = AutoModelForMaskedLM.from_pretrained("FacebookAI/xlm-roberta-base")
+    return model, tokenizer

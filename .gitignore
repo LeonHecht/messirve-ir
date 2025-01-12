@@ -9,3 +9,7 @@ __pycache__/
 
 # ignore any file inside corpus directory
 corpus/*
+
+results/
+
+logs/
