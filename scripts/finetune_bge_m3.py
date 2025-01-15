@@ -4,6 +4,7 @@ import json
 from tqdm import tqdm
 import sys
 print(sys.executable)
+import pickle
 
 
 def get_negatives(train_ds, query_id, k):
@@ -16,29 +17,45 @@ def get_negatives(train_ds, query_id, k):
     # Use a generator to filter out examples with the given query_id
     negs = [train_ds[i]["docid_text"] for i in indices]
     return negs
+    
 
 def convert():
     country = "ar"
     ds = load_dataset("spanish-ir/messirve", country)
 
+    with open("hard_negatives_2000_bge_ar.pkl", "rb") as f:
+        print("Loading hard negatives...", end="")
+        hard_negatives = pickle.load(f)
+        print("Done")
+
     # ['id', 'query', 'docid', 'docid_text', 'query_date', 'answer_date', 'match_score', 'expanded_search', 'answer_type']
-    train_ds = ds["train"]
+    train_ds = ds["train"][:2000]
 
     # {"query": str, "pos": List[str], "neg":List[str], "pos_scores": List[int], "neg_scores": List[int], "prompt": str, "type": str}
     json_out = []
 
-    for i, example in tqdm(enumerate(train_ds), total=len(train_ds)):
-        query = example["query"]
-        query_id = example["id"]
-        docid_text = example["docid_text"]
+    for i in tqdm(range(len(train_ds["id"])), total=len(train_ds["id"])):
+        query = train_ds["query"][i]
+        query_id = train_ds["id"][i]
+        docid_text = train_ds["docid_text"][i]
+        doc_id = train_ds["docid"][i]
 
-        negs = get_negatives(train_ds, query_id, k=10)
-
+        # negs = get_negatives(train_ds, query_id, k=10)
+        neg_doc_ids = hard_negatives[str(query_id)]
+        assert len(neg_doc_ids) == 15
+        negs = []
+        for j in range(len(train_ds["id"])):
+            if train_ds["docid"][j] in neg_doc_ids:
+                text = train_ds["docid_text"][j]
+                if text not in negs:
+                    negs.append(text)
+        assert len(negs) == 15
+        
         if query not in json_out:
             json_out.append({"query": query, "pos": [docid_text], "neg": negs, "neg_scores": [], "prompt": "", "type": ""})
 
     # dump json_dict to file
-    with open("messirve.json", "w", encoding="utf-8") as f:
+    with open("messirve_2000.json", "w", encoding="utf-8") as f:
         for line in json_out:
             json.dump(line, f, ensure_ascii=False)
             f.write("\n")
@@ -52,7 +69,7 @@ def finetune():
 	-m FlagEmbedding.finetune.embedder.encoder_only.m3 \
 	--model_name_or_path BAAI/bge-m3 \
     --cache_dir ./cache/model \
-    --train_data ./messirve.json\
+    --train_data ./messirve_2000.json\
     --cache_path ./cache/data \
     --train_group_size 8 \
     --query_max_len 256 \
