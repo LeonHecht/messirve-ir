@@ -1,4 +1,17 @@
-from transformers import AutoModel
+def get_bge_m3_model(checkpoint):
+    """ Load BAAI embeddings model."""
+    from FlagEmbedding import BGEM3FlagModel
+    # model = BGEM3FlagModel(checkpoint, use_fp16=True) # Setting use_fp16 to True speeds up computation with a slight performance degradation
+    model = BGEM3FlagModel(checkpoint) # Setting use_fp16 to True speeds up computation with a slight performance degradation
+    return model
+
+
+def get_jinja_model():
+    """ Load Jinja embeddings model."""
+    from transformers import AutoModel
+    model = AutoModel.from_pretrained("jinaai/jina-embeddings-v3", trust_remote_code=True)
+    return model
+
 
 def get_mamba_model():
     """ Load Mamba embeddings model."""
