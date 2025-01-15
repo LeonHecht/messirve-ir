@@ -33,7 +33,7 @@ class InfoNCERetrievalTrainer(Trainer):
             }
         
         query_embeds = model(query_inputs["input_ids"], query_inputs["attention_mask"]).logits[:, -1, :]
-        positive_embeds = model(positive_inputs["input_ids"], query_inputs["attention_mask"]).logits[:, -1, :]
+        positive_embeds = model(positive_inputs["input_ids"], positive_inputs["attention_mask"]).logits[:, -1, :]
         if negative_inputs is not None:
             negative_embeds = model(negative_inputs["input_ids"], negative_inputs["attention_mask"]).logits[:, -1, :]
 

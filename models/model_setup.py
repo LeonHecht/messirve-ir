@@ -23,10 +23,10 @@ def get_mamba_model():
     return model, tokenizer
 
 
-def get_xlm_roberta_model():
+def get_auto_model(checkpoint):
     # Load model directly
     from transformers import AutoTokenizer, AutoModelForMaskedLM
 
-    tokenizer = AutoTokenizer.from_pretrained("FacebookAI/xlm-roberta-base")
-    model = AutoModelForMaskedLM.from_pretrained("FacebookAI/xlm-roberta-base")
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+    model = AutoModelForMaskedLM.from_pretrained(checkpoint)
     return model, tokenizer
