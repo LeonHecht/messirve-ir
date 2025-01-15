@@ -1,4 +1,4 @@
-from models.model_setup import get_mamba_model, get_xlm_roberta_model
+from models.model_setup import get_mamba_model, get_auto_model
 from datasets import load_dataset
 from trainers.info_nce_trainer import InfoNCERetrievalTrainer
 from transformers import (
@@ -10,10 +10,11 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 
-def tokenize_function(tokenizer, examples):
+def tokenize_function(tokenizer, examples, append_eos=False):
     # Append the EOS token to queries and documents
-    examples["query"] = [q + tokenizer.eos_token for q in examples["query"]]
-    examples["docid_text"] = [d + tokenizer.eos_token for d in examples["docid_text"]]
+    if append_eos:
+        examples["query"] = [q + tokenizer.eos_token for q in examples["query"]]
+        examples["docid_text"] = [d + tokenizer.eos_token for d in examples["docid_text"]]
 
     tokenized_queries = tokenizer(examples["query"], truncation=True, padding=True, max_length=128)
     tokenized_docs = tokenizer(examples["docid_text"], truncation=True, padding=True, max_length=512)
@@ -51,12 +52,14 @@ def train():
     train_ds = ds["train"]
     test_ds = ds["test"]
 
-    model, tokenizer = get_mamba_model()
-    # model, tokenizer = get_xlm_roberta_model()
+    checkpoint = "distilbert/distilbert-base-multilingual-cased"
+
+    # model, tokenizer = get_mamba_model()
+    model, tokenizer = get_auto_model(checkpoint)
 
     # Apply tokenization to the dataset
-    train_ds = train_ds.map(lambda x: tokenize_function(tokenizer, x), batched=True)
-    test_ds = test_ds.map(lambda x: tokenize_function(tokenizer, x), batched=True)
+    train_ds = train_ds.map(lambda x: tokenize_function(tokenizer, x, append_eos=False), batched=True)
+    test_ds = test_ds.map(lambda x: tokenize_function(tokenizer, x, append_eos=False), batched=True)
 
     # docs_train = ds["train"]["docid_text"]
     # queries_train = ds["train"]["query"]
@@ -76,8 +79,8 @@ def train():
         output_dir="./results",           # Directory to save checkpoints
         evaluation_strategy="epoch",     # Evaluate at the end of each epoch
         learning_rate=2e-5,              # Learning rate
-        per_device_train_batch_size=16,  # Batch size for training
-        per_device_eval_batch_size=16,   # Batch size for evaluation
+        per_device_train_batch_size=8,  # Batch size for training
+        per_device_eval_batch_size=8,   # Batch size for evaluation
         num_train_epochs=3,              # Number of epochs
         weight_decay=0.01,               # Weight decay
         save_strategy="epoch",           # Save model checkpoints at the end of each epoch
