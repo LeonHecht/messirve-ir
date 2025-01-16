@@ -21,3 +21,9 @@ test_encoder_only_m3_bge-m3_sd/
 ds_stage0.json
 
 messirve.json
+
+saved_model/
+
+messirve_ar/
+
+messirve_train_ar_hard_negatives/
