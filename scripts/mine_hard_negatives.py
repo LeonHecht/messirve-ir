@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 def mine_hard_negatives(model, country, k):
     ds = load_dataset("spanish-ir/messirve", country)
-    train_ds = ds["train"][:2000]
+    train_ds = ds["train"]
     docs = train_ds["docid_text"]
     queries = train_ds["query"]
     doc_ids = train_ds["docid"]
@@ -21,7 +21,7 @@ def mine_hard_negatives(model, country, k):
     device = torch.device("cuda")
 
     if model == "bge":
-        run_path = f"run_bge_train_2000_{country}.pkl"
+        run_path = f"run_bge_train_{country}.pkl"
         if not os.path.exists(run_path):
             checkpoint = 'BAAI/bge-m3'
             # checkpoint = 'BAAI/bge-m3-unsupervised'
