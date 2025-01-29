@@ -9,19 +9,19 @@ print("Executable:", sys.executable)
 from tqdm import tqdm
 
 
-def mine_hard_negatives(model, country, k):
+def mine_hard_negatives(model, country, k, split):
     ds = load_dataset("spanish-ir/messirve", country)
-    train_ds = ds["train"]
-    docs = train_ds["docid_text"]
-    queries = train_ds["query"]
-    doc_ids = train_ds["docid"]
-    query_ids = train_ds["id"]
+    ds = ds[split]
+    docs = ds["docid_text"]
+    queries = ds["query"]
+    doc_ids = ds["docid"]
+    query_ids = ds["id"]
     print("Data prepared.")
 
     device = torch.device("cuda")
 
     if model == "bge":
-        run_path = f"run_bge_train_{country}.pkl"
+        run_path = f"run_bge_{split}_{country}.pkl"
         if not os.path.exists(run_path):
             checkpoint = 'BAAI/bge-m3'
             # checkpoint = 'BAAI/bge-m3-unsupervised'
@@ -63,8 +63,9 @@ if __name__ == "__main__":
     model = "bge"
     country = "ar"
     k = 15
-    hard_negatives = mine_hard_negatives(model, country, k)
-    with open(f"hard_negatives_{model}_{country}.pkl", "wb") as f:
+    split = "test"
+    hard_negatives = mine_hard_negatives(model, country, k, split)
+    with open(f"hard_negatives_{split}_{model}_{country}.pkl", "wb") as f:
         print("Dumping hard negatives to pickle file...", end="")
         pickle.dump(hard_negatives, f)
         print("Done")

@@ -1,0 +1,12 @@
+# config.yaml
+experiment:
+  checkpoint: "sentence-transformers/distiluse-base-multilingual-cased-v2"
+  dataset_name: "messirve_ar_hard_negatives5_sbert"
+  loss_name: "MultipleNegativesRankingLoss"
+  learning_rate: 2e-5
+  batch_size: 16
+  num_epochs: 3
+  fp16: False
+  bf16: True
+  eval_steps: 100
+  save_steps: 100
