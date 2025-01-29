@@ -2,48 +2,52 @@ import os
 from datetime import datetime
 
 
-def log_md(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name, training_results, eval_results):
+def log_md(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name, training_results):
     # Define experiment parameters
     experiment_date = datetime.now().strftime('%Y-%m-%d')
 
     # Format the training results as a Markdown table
-    training_table = "| Epoch | Loss  | Grad Norm | Learning Rate |\n"
-    training_table += "|-------|-------|----------|--------------|\n"
+    training_table = "| Loss | Grad Norm | Learning Rate | Epoch \n"
+    training_table += "|-------|-------|-----------|---------------|\n"
     for result in training_results:
-        training_table += f"| {result['loss']:.4f} | {result['grad_norm']:.2e} | {result['learning_rate']:.2e} | {result['epoch']:.2f} |\n"
-
-    # Format the evaluation results as a Markdown table
-    eval_table = "| Epoch | Eval Loss |\n"
-    eval_table += "|-------|----------|\n"
-    for result in eval_results:
-        eval_table += f"| {result['loss']:.4f} | {result['epoch']:.2f} |\n"
+        if 'loss' in result and 'grad_norm' in result:
+            training_table += f"| {result['loss']:.4f} | {result['grad_norm']:.2e} | {result['learning_rate']:.2e} | {result['epoch']:.2f} |\n"
+        elif 'loss' in result:
+            training_table += f"| {result['loss']:.4f} | - | {result['learning_rate']:.2e} | {result['epoch']:.2f} |\n"
+        elif 'eval_loss' in result:
+            training_table += f"| {result['eval_loss']:.4f} | - | - | {result['epoch']:.2f} |\n"
 
     # Create Markdown content
     markdown_content = f"""# Experiment Log
 
-    ## Experiment ID: {exp_id}
-    - **Date**: {experiment_date}
-    - **Model**: `{model_name}`
-    - **Dataset**: `{dataset_name}`
-    - **Loss Function**: `{loss_name}`
-    - **GPU Name**: `{gpu_name}`
+## Experiment ID: {exp_id}
+- **Date**: {experiment_date}
+- **Model**: `{model_name}`
+- **Dataset**: `{dataset_name}`
+- **Loss Function**: `{loss_name}`
+- **GPU Name**: `{gpu_name}`
 
-    ### Training Arguments:
-    {training_args}
+### Training Arguments:
+- **Batch Size**: {training_args["per_device_train_batch_size"]}
+- **Learning Rate**: {training_args["learning_rate"]}
+- **FP16**: {training_args["fp16"]}
+- **BF16**: {training_args["bf16"]}
+- **Gradient Clipping**: {training_args.get("max_grad_norm", "None")}
+- **Warmup Ratio**: {training_args.get("warmup_ratio", "None")}
+- **Weight Decay**: {training_args.get("weight_decay", "None")}
+- **Epochs**: {training_args["num_train_epochs"]}
 
-    ### Training Results:
-    {training_table}
-    
-    ### Evaluation Results:
-    {training_table}
+### Training Results:
+{training_table}
 
-    ### Observations:
-    (Write your observations here manually)
+### Observations:
+(Write observations here manually)
     """
 
     # Define output directory and filename
     output_dir = "experiment_logs"
     os.makedirs(output_dir, exist_ok=True)
+
     filename = os.path.join(output_dir, f"{exp_id}.md")
 
     # Write to file
@@ -55,18 +59,18 @@ def log_md(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name,
 
 import csv
 
-def log_csv(exp_id, model_name, dataset_name, loss_name, training_results, eval_results, args, gpu_name):
+def log_csv(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name, training_results):
     """Logs experiment details as a new row in a CSV file."""
     
     # Define CSV file path
+    curr_file_path = os.path.abspath(os.path.dirname(__file__))
+    base_dir = os.path.join(curr_file_path, "..")
     csv_filename = "experiment_logs.csv"
+    csv_filename = os.path.join(base_dir, csv_filename)
     file_exists = os.path.isfile(csv_filename)  # Check if file already exists
 
     # Extract experiment metadata
     date = datetime.now().strftime('%Y-%m-%d')
-    
-    # Extract training arguments
-    training_args = args.to_dict()
 
     # Prepare the CSV row (Flatten the training args)
     csv_row = {
@@ -86,21 +90,16 @@ def log_csv(exp_id, model_name, dataset_name, loss_name, training_results, eval_
         "GPU": gpu_name,
     }
 
-    # Get last epoch results (final loss & grad norm)
-    if training_results:
-        last_epoch_result = training_results[-1]
+    
+    last_epoch_result = training_results[-1]
+    if "loss" in last_epoch_result:
         csv_row["Final Train Loss"] = last_epoch_result["loss"]
-        csv_row["Final Grad Norm"] = last_epoch_result["grad_norm"]
+    elif "eval_loss" in last_epoch_result:
+        csv_row["Final Test Loss"] = last_epoch_result["eval_loss"]
+        previous_epoch_result = training_results[-2]
+        csv_row["Final Train Loss"] = previous_epoch_result["loss"]
     else:
         csv_row["Final Train Loss"] = "N/A"
-        csv_row["Final Grad Norm"] = "N/A"
-    
-    # Get last epoch results (final loss & grad norm)
-    if eval_results:
-        last_epoch_result = eval_results[-1]
-        csv_row["Final Eval Loss"] = last_epoch_result["loss"]
-    else:
-        csv_row["Final Eval Loss"] = "N/A"
     
     csv_row["nDCG"] = ""
     csv_row["nDCG@10"] = ""
@@ -127,7 +126,7 @@ def log_csv(exp_id, model_name, dataset_name, loss_name, training_results, eval_
 
 import matplotlib.pyplot as plt
 
-def log_plot(exp_id, training_results, eval_results):
+def log_plot(exp_id, training_results):
     """Plots training and evaluation loss curves and saves them to a file."""
     
     output_dir = "experiment_logs"
@@ -138,13 +137,18 @@ def log_plot(exp_id, training_results, eval_results):
     # Ensure the directory exists
     os.makedirs(os.path.dirname(filename), exist_ok=True)
 
-    # Extract training data
-    train_epochs = [result["epoch"] for result in training_results]
-    train_losses = [result["loss"] for result in training_results]
+    train_epochs = []
+    train_losses = []
+    eval_epochs = []
+    eval_losses = []
 
-    # Extract evaluation data
-    eval_epochs = [result["epoch"] for result in eval_results]
-    eval_losses = [result["loss"] for result in eval_results]
+    for result in training_results:
+        if "loss" in result:
+            train_epochs.append(result["epoch"])
+            train_losses.append(result["loss"])
+        elif "eval_loss" in result:
+            eval_epochs.append(result["epoch"])
+            eval_losses.append(result["eval_loss"])
 
     # Create the plot
     plt.figure(figsize=(8, 5))

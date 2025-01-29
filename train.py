@@ -1,6 +1,7 @@
 import sys
 print(sys.executable)
-
+import os
+import json
 from datetime import datetime
 import torch
 from datasets import load_from_disk, load_dataset
@@ -15,6 +16,9 @@ from sentence_transformers.training_args import BatchSamplers
 from sentence_transformers.evaluation import TripletEvaluator
 
 from utils import log_experiment
+
+import hydra
+from omegaconf import DictConfig
 
 print("All imports successful")
 
@@ -31,11 +35,17 @@ def get_model(checkpoint):
 
 
 def get_dataset():
-    # 3. Load a dataset to finetune on
-    # dataset = load_dataset("sentence-transformers/all-nli", "triplet")
-    train_dataset = load_from_disk("messirve_train_ar_hard_negatives_sbert")
-    eval_dataset = load_from_disk("messirve_test_ar_hard_negatives_sbert")
-    # test_dataset = dataset["test"]
+    base_dir = os.path.abspath(os.path.dirname(__file__))
+    train_path = os.path.join(base_dir, "messirve_train_ar_hard_negatives_sbert")
+    eval_path = os.path.join(base_dir, "messirve_test_ar_hard_negatives_sbert")
+    train_dataset = load_from_disk(train_path)
+    eval_dataset = load_from_disk(eval_path)
+
+    # cut train dataset to 1000 samples
+    train_dataset = train_dataset.select(range(1000))
+    # cut eval dataset to 300 samples
+    eval_dataset = eval_dataset.select(range(300))
+    
     return train_dataset, eval_dataset
 
 
@@ -43,33 +53,6 @@ def get_loss(model):
     # 4. Define a loss function
     loss = MultipleNegativesRankingLoss(model)
     return loss
-
-
-def get_training_args():
-    # 5. (Optional) Specify training arguments
-    args = SentenceTransformerTrainingArguments(
-        # Required parameter:
-        output_dir="finetuned_models/distiluse-base-multilingual-cased-v2",
-        # Optional training parameters:
-        # max_grad_norm=0.5,  # Clip gradients to prevent exploding gradients
-        num_train_epochs=3,
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=16,
-        learning_rate=2e-5,
-        warmup_ratio=0.1,
-        fp16=False,  # Set to False if you get an error that your GPU can't run on FP16
-        bf16=True,  # Set to True if you have a GPU that supports BF16
-        batch_sampler=BatchSamplers.NO_DUPLICATES,  # MultipleNegativesRankingLoss benefits from no duplicate samples in a batch
-        # Optional tracking/debugging parameters:
-        eval_strategy="steps",
-        eval_steps=100,
-        save_strategy="steps",
-        save_steps=100,
-        save_total_limit=1,
-        logging_steps=20,
-        run_name="distiluse-base-multilingual-cased-v2-5-HN",  # Will be used in W&B if `wandb` is installed
-    )
-    return args
 
 
 def get_evaluator(eval_dataset, model):
@@ -97,50 +80,82 @@ def get_trainer(model, args, train_dataset, eval_dataset, loss, dev_evaluator):
     return trainer
 
 
-def train():
-    checkpoint = "sentence-transformers/distiluse-base-multilingual-cased-v2"
+def extract_training_metrics(output_dir):
+    """Load training and evaluation logs from trainer_state.json"""
+    checkpoint_dir = os.listdir(output_dir)[0]
+    trainer_state_path = os.path.join(output_dir, checkpoint_dir, "trainer_state.json")
+
+    if not os.path.exists(trainer_state_path):
+        raise FileNotFoundError(f"No trainer_state.json found in {output_dir}")
+
+    with open(trainer_state_path, "r") as f:
+        trainer_state = json.load(f)
+
+    training_results = trainer_state.get("log_history", [])
+    
+    return training_results
+
+
+@hydra.main(config_path=".", config_name="config")
+def train(cfg: DictConfig):
+    # Access parameters from the Hydra config
+    checkpoint = cfg.experiment.checkpoint
+    dataset_name = cfg.experiment.dataset_name
+    loss_name = cfg.experiment.loss_name
+    learning_rate = cfg.experiment.learning_rate
+    batch_size = cfg.experiment.batch_size
+    num_epochs = cfg.experiment.num_epochs
+    warmup_ratio = cfg.experiment.warmup_ratio
+    weight_decay = cfg.experiment.weight_decay
+    max_grad_norm = cfg.experiment.max_grad_norm
+    fp16 = cfg.experiment.fp16
+    bf16 = cfg.experiment.bf16
+    eval_steps = cfg.experiment.eval_steps
+    save_steps = cfg.experiment.save_steps
+
+    experiment_id = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    output_dir=f"finetuned_models/{checkpoint}-{experiment_id}"
+
     model = get_model(checkpoint)
     print("Model loaded")
     train_dataset, eval_dataset = get_dataset()
     print("Datasets loaded")
     loss = get_loss(model)
     print("Loss function defined")
-    args = get_training_args()
+
+    args = SentenceTransformerTrainingArguments(
+        # Required parameter:
+        output_dir=output_dir,  # Output directory
+        # Optional training parameters:
+        max_grad_norm=max_grad_norm,  # Clip gradients to prevent exploding gradients
+        num_train_epochs=num_epochs,
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        learning_rate=learning_rate,
+        warmup_ratio=warmup_ratio,  # Warmup ratio for the learning rate scheduler
+        weight_decay=weight_decay,  # Strength of weight decay
+        fp16=fp16,  # Set to False if you get an error that your GPU can't run on FP16
+        bf16=bf16,  # Set to True if you have a GPU that supports BF16
+        batch_sampler=BatchSamplers.NO_DUPLICATES,  # MultipleNegativesRankingLoss benefits from no duplicate samples in a batch
+        # Optional tracking/debugging parameters:
+        eval_strategy="steps",
+        eval_steps=eval_steps,
+        save_strategy="steps",
+        save_steps=save_steps,
+        save_total_limit=1,
+        logging_steps=20,
+        # run_name="distiluse-base-multilingual-cased-v2-5-HN",  # Will be used in W&B if `wandb` is installed
+    )
     print("Training arguments defined")
+
     dev_evaluator = get_evaluator(eval_dataset, model)
 
     trainer = get_trainer(model, args, train_dataset, eval_dataset, loss, dev_evaluator)
+    
+    trainer.train()
 
     # Store training results
-    training_results = []
-
-    # Callback function to log results dynamically
-    def log_callback(logs):
-        if "loss" in logs and "epoch" in logs:
-            training_results.append({
-                "loss": logs["loss"],
-                "grad_norm": logs.get("grad_norm", float('nan')),  # Some trainers don't log grad_norm explicitly
-                "learning_rate": logs.get("learning_rate", float('nan')),
-                "epoch": logs["epoch"],
-            })
-
-    trainer.add_callback(log_callback)
-
-    # Store evaluation results
-    eval_results = []
-
-    def eval_callback(logs):
-        """Capture evaluation logs dynamically."""
-        if "loss" in logs and "epoch" in logs:
-            eval_results.append({
-                "epoch": logs["epoch"],
-                "loss": logs["loss"],
-            })
-
-    # Attach the callback to the evaluation process
-    trainer.add_eval_callback(eval_callback)
-
-    trainer.train()
+    training_metrics = extract_training_metrics(output_dir)
 
     # # (Optional) Evaluate the trained model on the test set
     # test_evaluator = TripletEvaluator(
@@ -154,14 +169,15 @@ def train():
     dataset_name = "messirve_ar_hard_negatives5_sbert"
     loss_name = "MultipleNegativesRankingLoss"
     hardware = torch.cuda.get_device_name(0)
-    experiment_id = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     model_name = checkpoint.split("/")[-1]
-    log_experiment.log_md(experiment_id, model_name, dataset_name, loss_name, args.to_dict(), hardware, training_results)
-    log_experiment.log_csv(experiment_id, training_results, args)
-    log_experiment.log_plot(experiment_id, training_results, eval_results)
+    log_experiment.log_md(experiment_id, model_name, dataset_name, loss_name, args.to_dict(), hardware, training_metrics)
+    log_experiment.log_csv(experiment_id, model_name, dataset_name, loss_name, args.to_dict(), hardware, training_metrics)
+    log_experiment.log_plot(experiment_id, training_metrics)
 
     # 8. Save the trained model
-    model.save_pretrained(f"finetuned_models/{model_name}-{experiment_id}")
+    model_save_path = f"finetuned_models/{model_name}-{experiment_id}"
+    model.save_pretrained(model_save_path)
+    print(f"Model saved to: {model_save_path}")
 
     # # 9. (Optional) Push it to the Hugging Face Hub
     # model.push_to_hub("mpnet-base-all-nli-triplet")

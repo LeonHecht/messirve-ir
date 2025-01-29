@@ -35,3 +35,11 @@ messirve_test_ar_hard_negatives/
 
 messirve_train_ar_hard_negatives_sbert/
 messirve_test_ar_hard_negatives_sbert/
+
+outputs/
+
+multirun/
+
+.hydra/
+
+*.log
