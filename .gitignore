@@ -33,8 +33,8 @@ finetuned_models/
 messirve_train_ar_hard_negatives/
 messirve_test_ar_hard_negatives/
 
-# messirve_train_ar_hard_negatives_sbert/
-# messirve_test_ar_hard_negatives_sbert/
+messirve_train_ar_hard_negatives_sbert/
+messirve_test_ar_hard_negatives_sbert/
 
 outputs/
 
