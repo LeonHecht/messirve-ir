@@ -43,3 +43,5 @@ multirun/
 .hydra/
 
 *.log
+
+*.csv
