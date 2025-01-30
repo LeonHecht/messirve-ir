@@ -51,12 +51,6 @@ def get_dataset():
     return train_dataset, eval_dataset
 
 
-def get_loss(model):
-    # 4. Define a loss function
-    loss = MultipleNegativesRankingLoss(model)
-    return loss
-
-
 def get_evaluator(eval_dataset, model):
     # # 6. (Optional) Create an evaluator & evaluate the base model
     # dev_evaluator = TripletEvaluator(
@@ -138,7 +132,7 @@ def train(cfg: DictConfig):
     print("Model loaded")
     train_dataset, eval_dataset = get_dataset()
     print("Datasets loaded")
-    loss = get_loss(model)
+    loss = MultipleNegativesRankingLoss(model)
     print("Loss function defined")
 
     args = SentenceTransformerTrainingArguments(
