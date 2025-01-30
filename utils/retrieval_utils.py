@@ -8,7 +8,18 @@ MAX_QUERY_LEN = 256
 MAX_DOC_LEN = 2048
 
 
-def retrieve(query_ids, doc_ids, embeddings_queries, embeddings_docs, sim_type='dot'):
+def retrieve(query_ids, doc_ids, similarity):
+    print("Creating run...", end="")
+    run = {}
+    for i in range(len(query_ids)):
+        query_sim = similarity[i]
+        
+        run[str(query_ids[i])] = {str(doc_ids[j]): float(query_sim[j]) for j in range(len(doc_ids))}
+    print("Done.")
+    return run
+
+
+def compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs, sim_type='dot'):
     """
     Given a list of queries and documents, and their embeddings, compute the similarity between queries and documents
     and return the top_k most similar documents for each query.
@@ -43,14 +54,7 @@ def retrieve(query_ids, doc_ids, embeddings_queries, embeddings_docs, sim_type='
     # print("similarity", similarity)   # [[0.6265, 0.3477], [0.3499, 0.678 ]]
     print("Done.")
 
-    print("Creating run...", end="")
-    run = {}
-    for i in range(len(query_ids)):
-        query_sim = similarity[i]
-        
-        run[str(query_ids[i])] = {str(doc_ids[j]): float(query_sim[j]) for j in range(len(doc_ids))}
-    print("Done.")
-    return run
+    return retrieve(query_ids, doc_ids, similarity)
 
 
 def embed_jinja(model, docs, queries, doc_ids, query_ids):
@@ -82,7 +86,7 @@ def embed_jinja(model, docs, queries, doc_ids, query_ids):
         embeddings_docs = np.load(path)
 
     # Compute similarities
-    run = retrieve(query_ids, doc_ids, embeddings_queries, embeddings_docs)
+    run = compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs)
     return run
 
 
@@ -116,7 +120,7 @@ def embed_bge(model, docs, queries, doc_ids, query_ids):
         embeddings_docs = np.load(path)
 
     # Compute similarities
-    run = retrieve(query_ids, doc_ids, embeddings_queries, embeddings_docs)
+    run = compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs)
     return run
 
 
@@ -182,8 +186,15 @@ def embed_mamba(model, tokenizer, docs, queries, doc_ids, query_ids):
     embeddings_queries = torch.cat(embeddings_queries, dim=0)  # Combine batches
     print("Embeddings done.")
 
-    run = retrieve(query_ids, doc_ids, embeddings_queries, embeddings_docs)
+    run = compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs)
     return run
+
+
+def embed_s_transformers(model, docs, queries, doc_ids, query_ids):
+    embeddings_queries = model.encode(queries)
+    embeddings_docs = model.encode(docs)
+    similarity = model.similarity(embeddings_queries, embeddings_docs)
+    return retrieve(query_ids, doc_ids, similarity)
 
 
 def retrieve_bm25(docs, queries, doc_ids, query_ids):

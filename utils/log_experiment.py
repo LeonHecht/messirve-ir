@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 
 
-def log_md(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name, training_results):
+def log_md(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name, training_results, ir_metrics):
     # Define experiment parameters
     experiment_date = datetime.now().strftime('%Y-%m-%d')
 
@@ -40,6 +40,9 @@ def log_md(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name,
 ### Training Results:
 {training_table}
 
+### IR Metrics:
+{ir_metrics}
+
 ### Observations:
 (Write observations here manually)
     """
@@ -59,7 +62,7 @@ def log_md(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name,
 
 import csv
 
-def log_csv(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name, training_results):
+def log_csv(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name, training_results, ir_metrics):
     """Logs experiment details as a new row in a CSV file."""
     
     # Define CSV file path
@@ -101,11 +104,11 @@ def log_csv(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name
     else:
         csv_row["Final Train Loss"] = "N/A"
     
-    csv_row["nDCG"] = ""
-    csv_row["nDCG@10"] = ""
-    csv_row["Recall@100"] = ""
-    csv_row["Recall@10"] = ""
-    csv_row["MRR"] = ""
+    csv_row["nDCG"] = ir_metrics["ndcg"]
+    csv_row["nDCG@10"] = ir_metrics["ndcg_cut_10"]
+    csv_row["Recall@100"] = ir_metrics["recall_100"]
+    csv_row["Recall@10"] = ir_metrics["recall_10"]
+    csv_row["MRR"] = ir_metrics["recip_rank"]
 
     # Define CSV headers
     headers = list(csv_row.keys())

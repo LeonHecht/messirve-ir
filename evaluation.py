@@ -10,12 +10,14 @@ from utils.retrieval_utils import (
     embed_bge,
     embed_jinja,
     embed_mamba,
-    retrieve_bm25
+    retrieve_bm25,
+    embed_s_transformers
 )
 
 from models.model_setup import get_bge_m3_model, get_jinja_model
 
-def run(model, metrics, country):
+def run(model, metrics, country, model_instance=None, reuse_run=False):
+    print("Starting Evaluation")
     ds = load_dataset("spanish-ir/messirve", country)
     docs = ds["test"]["docid_text"]
     queries = ds["test"]["query"]
@@ -27,7 +29,7 @@ def run(model, metrics, country):
 
     if model == "bm25":
         run_path = f"run_bm25_{country}.pkl"
-        if not os.path.exists(run_path):
+        if not os.path.exists(run_path) or not reuse_run:
             run = retrieve_bm25(docs, queries, doc_ids, query_ids)
             # save qrels_model to disk using pickle
             with open(run_path, "wb") as f:
@@ -40,7 +42,7 @@ def run(model, metrics, country):
         print("BM25 retrieval done.")
     elif model == "bge":
         run_path = f"run_bge_{country}.pkl"
-        if not os.path.exists(run_path):
+        if not os.path.exists(run_path) or not reuse_run:
             checkpoint = 'BAAI/bge-m3'
             # checkpoint = 'BAAI/bge-m3-unsupervised'
             # checkpoint = 'BAAI/bge-m3-retromae'
@@ -55,7 +57,7 @@ def run(model, metrics, country):
                 run = pickle.load(f)
     elif model == "jinja":
         run_path = f"run_jinja_{country}.pkl"
-        if not os.path.exists(run_path):
+        if not os.path.exists(run_path) or not reuse_run:
             model = get_jinja_model()
             model.to(device)
             run = embed_jinja(model, docs, queries, doc_ids, query_ids)
@@ -68,7 +70,7 @@ def run(model, metrics, country):
                 run = pickle.load(f)
     elif model == "mamba":
         run_path = f"run_mamba_{country}.pkl"
-        if not os.path.exists(run_path):
+        if not os.path.exists(run_path) or not reuse_run:
             model, tokenizer = model_setup.get_mamba_model()
             model.to(device)
             run = embed_mamba(model, tokenizer, docs, queries, doc_ids, query_ids)
@@ -81,12 +83,24 @@ def run(model, metrics, country):
                 run = pickle.load(f)
     elif model == "bge-finetuned":
         run_path = f"run_bge_finetuned_{country}.pkl"
-        if not os.path.exists(run_path):
+        if not os.path.exists(run_path) or not reuse_run:
             checkpoint = 'test_encoder_only_m3_bge-m3_sd'
             # checkpoint = 'BAAI/bge-m3-unsupervised'
             # checkpoint = 'BAAI/bge-m3-retromae'
             model = get_bge_m3_model(checkpoint)
             run = embed_bge(model, docs, queries, doc_ids, query_ids)
+            # save run to disk using pickle
+            with open(run_path, "wb") as f:
+                print("Dumping run to pickle file...")
+                pickle.dump(run, f)
+        else:
+            with open(run_path, "rb") as f:
+                run = pickle.load(f)
+    elif model == "sentence-transformer":
+        run_path = f"run_sentence_transformer_{country}.pkl"
+        if not os.path.exists(run_path) or not reuse_run:
+            model = model_instance
+            run = embed_s_transformers(model, docs, queries, doc_ids, query_ids)
             # save run to disk using pickle
             with open(run_path, "wb") as f:
                 print("Dumping run to pickle file...")
@@ -127,10 +141,14 @@ def run(model, metrics, country):
     for metric_name, metric_value in avg_metrics.items():
         print(f"Average {metric_name}: {metric_value}")
 
+    print("\n")
+    
+    return avg_metrics
+
 
 if __name__ == "__main__":
     # run(model="bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
     # run(model="bge", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
-    run(model="bge-finetuned", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
+    run(model="bge-finetuned", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar")
     # run(model="jinja", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
     # run(model="mamba", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
