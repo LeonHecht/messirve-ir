@@ -102,9 +102,9 @@ def run(model, metrics, country, model_instance=None, reuse_run=False):
             model = model_instance
             run = embed_s_transformers(model, docs, queries, doc_ids, query_ids)
             # save run to disk using pickle
-            with open(run_path, "wb") as f:
-                print("Dumping run to pickle file...")
-                pickle.dump(run, f)
+            # with open(run_path, "wb") as f:
+            #     print("Dumping run to pickle file...")
+            #     pickle.dump(run, f)
         else:
             with open(run_path, "rb") as f:
                 run = pickle.load(f)

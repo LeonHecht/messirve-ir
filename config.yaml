@@ -2,13 +2,25 @@ experiment:
   checkpoint: "sentence-transformers/distiluse-base-multilingual-cased-v2"  # Pretrained model checkpoint
   dataset_name: "messirve_ar_hard_negatives5_sbert"  # Dataset name (used for logging, not loading)
   loss_name: "MultipleNegativesRankingLoss"  # Loss function name (used for logging)
-  learning_rate: 2e-5  # Initial learning rate
-  batch_size: 16  # Training and evaluation batch size
-  num_epochs: 2  # Total number of training epochs
+  learning_rate: 1e-5  # Initial learning rate
+  batch_size: 32  # Training and evaluation batch size
+  num_epochs: 4  # Total number of training epochs
   warmup_ratio: 0.1  # Warmup ratio for the learning rate scheduler
-  weight_decay: 0.01  # Weight decay (null = no weight decay)
-  max_grad_norm: 1000  # Maximum gradient norm for clipping (null = no clipping)
+  weight_decay: 0.01  # Weight decay
+  max_grad_norm: 30  # Maximum gradient norm for clipping
   fp16: False  # Enable mixed precision (FP16) training
-  bf16: True  # Enable BF16 precision training (overrides FP16 if supported)
-  eval_steps: 100  # Perform evaluation every N steps
-  save_steps: 100  # Save the model every N steps
+  bf16: False  # Enable BF16 precision training (overrides FP16 if supported)
+  eval_steps: 200  # Perform evaluation every N steps
+  save_steps: 400  # Save the model every N steps
+
+hydra:
+  job_logging:
+    root:
+      level: DEBUG  # More detailed logs
+    hydra:
+      level: DEBUG  # More logs from Hydra itself
+  sweeper:
+    params:
+      experiment.learning_rate: 1e-5, 5e-6
+      experiment.checkpoint: "sentence-transformers/distiluse-base-multilingual-cased-v1"
+      experiment.batch_size: 16, 32
