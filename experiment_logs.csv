@@ -5,3 +5,4 @@ exp_20250129_170330,2025-01-29,distiluse-base-multilingual-cased-v2,messirve_ar_
 exp_20250129_170513,2025-01-29,distiluse-base-multilingual-cased-v2,messirve_ar_hard_negatives5_sbert,MultipleNegativesRankingLoss,16,2e-05,False,True,1000,0.1,0.01,2,NVIDIA RTX A5000,0.9197,,,,,
 exp_20250129_170951,2025-01-29,distiluse-base-multilingual-cased-v2,messirve_ar_hard_negatives5_sbert,MultipleNegativesRankingLoss,16,2e-05,False,True,1000,0.1,0.01,2,NVIDIA RTX A5000,0.9197,,,,,
 exp_20250129_171215,2025-01-29,distiluse-base-multilingual-cased-v2,messirve_ar_hard_negatives5_sbert,MultipleNegativesRankingLoss,16,2e-05,False,True,1000,0.1,0.01,2,NVIDIA RTX A5000,0.9197,,,,,
+exp_20250129_180031,2025-01-29,distiluse-base-multilingual-cased-v2,messirve_ar_hard_negatives5_sbert,MultipleNegativesRankingLoss,16,2e-05,False,True,1000,0.1,0.01,2,NVIDIA RTX A5000,0.9197,0.6762583951638966,0.6372770718619413,0.912789636927568,0.7757708447363619,0.5989364206734868

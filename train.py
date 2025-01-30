@@ -20,6 +20,8 @@ from utils import log_experiment
 import hydra
 from omegaconf import DictConfig
 
+import evaluation
+
 print("All imports successful")
 
 
@@ -157,6 +159,8 @@ def train(cfg: DictConfig):
     # Store training results
     training_metrics = extract_training_metrics(output_dir)
 
+    ir_metrics = evaluation.run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", model_instance=model, reuse_run=False)
+
     # # (Optional) Evaluate the trained model on the test set
     # test_evaluator = TripletEvaluator(
     #     anchors=test_dataset["anchor"],
@@ -170,8 +174,8 @@ def train(cfg: DictConfig):
     loss_name = "MultipleNegativesRankingLoss"
     hardware = torch.cuda.get_device_name(0)
     model_name = checkpoint.split("/")[-1]
-    log_experiment.log_md(experiment_id, model_name, dataset_name, loss_name, args.to_dict(), hardware, training_metrics)
-    log_experiment.log_csv(experiment_id, model_name, dataset_name, loss_name, args.to_dict(), hardware, training_metrics)
+    log_experiment.log_md(experiment_id, model_name, dataset_name, loss_name, args.to_dict(), hardware, training_metrics, ir_metrics)
+    log_experiment.log_csv(experiment_id, model_name, dataset_name, loss_name, args.to_dict(), hardware, training_metrics, ir_metrics)
     log_experiment.log_plot(experiment_id, training_metrics)
 
     # 8. Save the trained model
