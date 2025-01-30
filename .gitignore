@@ -45,3 +45,5 @@ multirun/
 *.log
 
 *.csv
+
+*.lsf
