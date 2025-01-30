@@ -1,6 +1,9 @@
 import sys
 print(sys.executable)
 import os
+# Define storage location: Change this to "/tmpu/$USER" for clusters or "$HOME" for local use
+STORAGE_DIR = os.getenv("STORAGE_DIR", f"/tmpu/{os.getenv('USER')}")
+# STORAGE_DIR = os.getenv("STORAGE_DIR", "$HOME/tesis/messirve-ir")
 import json
 from datetime import datetime
 import torch
@@ -37,9 +40,8 @@ def get_model(checkpoint):
 
 
 def get_dataset():
-    base_dir = os.path.abspath(os.path.dirname(__file__))
-    train_path = os.path.join(base_dir, "messirve_train_ar_hard_negatives_sbert")
-    eval_path = os.path.join(base_dir, "messirve_test_ar_hard_negatives_sbert")
+    train_path = os.path.join(STORAGE_DIR, "messirve_train_ar_hard_negatives_sbert")
+    eval_path = os.path.join(STORAGE_DIR, "messirve_test_ar_hard_negatives_sbert")
     train_dataset = load_from_disk(train_path)
     eval_dataset = load_from_disk(eval_path)
 
@@ -110,7 +112,9 @@ def train(cfg: DictConfig):
     save_steps = cfg.experiment.save_steps
 
     experiment_id = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    output_dir=f"finetuned_models/{checkpoint}-{experiment_id}"
+    # output_dir=f"finetuned_models/{checkpoint}-{experiment_id}"
+    output_dir = os.path.join(STORAGE_DIR, "checkpoints", f"{checkpoint}-{experiment_id}")
+    os.makedirs(output_dir, exist_ok=True)
 
     print("\n\n---------------------------------------------")
     print("Starting experiment:", experiment_id)
@@ -190,6 +194,7 @@ def train(cfg: DictConfig):
 
     # 8. Save the trained model
     model_save_path = f"finetuned_models/{model_name}-{experiment_id}"
+    os.makedirs(model_save_path, exist_ok=True)
     model.save_pretrained(model_save_path)
     print(f"Model saved to: {model_save_path}")
 
