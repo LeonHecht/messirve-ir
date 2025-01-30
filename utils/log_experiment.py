@@ -1,6 +1,10 @@
 import os
 from datetime import datetime
 
+STORAGE_DIR = "/tmpu/helga_g/leonh_a/messirve-ir"  # Change this path based on the environment
+output_dir = os.path.join(STORAGE_DIR, "experiment_logs")
+os.makedirs(output_dir, exist_ok=True)
+
 
 def log_md(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name, training_results, ir_metrics):
     # Define experiment parameters
@@ -46,11 +50,6 @@ def log_md(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name,
 ### Observations:
 (Write observations here manually)
     """
-
-    # Define output directory and filename
-    output_dir = "experiment_logs"
-    os.makedirs(output_dir, exist_ok=True)
-
     filename = os.path.join(output_dir, f"{exp_id}.md")
 
     # Write to file
@@ -66,10 +65,7 @@ def log_csv(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name
     """Logs experiment details as a new row in a CSV file."""
     
     # Define CSV file path
-    curr_file_path = os.path.abspath(os.path.dirname(__file__))
-    base_dir = os.path.join(curr_file_path, "..")
-    csv_filename = "experiment_logs.csv"
-    csv_filename = os.path.join(base_dir, csv_filename)
+    csv_filename = os.path.join(STORAGE_DIR, "experiment_logs.csv")
     file_exists = os.path.isfile(csv_filename)  # Check if file already exists
 
     # Extract experiment metadata
@@ -131,10 +127,7 @@ import matplotlib.pyplot as plt
 
 def log_plot(exp_id, training_results):
     """Plots training and evaluation loss curves and saves them to a file."""
-    
-    output_dir = "experiment_logs"
-    os.makedirs(output_dir, exist_ok=True)
-
+  
     filename = os.path.join(output_dir, f"{exp_id}.png")
     
     # Ensure the directory exists
