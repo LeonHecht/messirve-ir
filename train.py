@@ -43,10 +43,10 @@ def get_dataset():
     train_dataset = load_from_disk(train_path)
     eval_dataset = load_from_disk(eval_path)
 
-    # cut train dataset to 1000 samples
-    train_dataset = train_dataset.select(range(1000))
-    # cut eval dataset to 300 samples
-    eval_dataset = eval_dataset.select(range(300))
+    # # cut train dataset to 1000 samples
+    # train_dataset = train_dataset.select(range(1000))
+    # # cut eval dataset to 300 samples
+    # eval_dataset = eval_dataset.select(range(300))
     
     return train_dataset, eval_dataset
 
@@ -117,6 +117,22 @@ def train(cfg: DictConfig):
 
     experiment_id = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     output_dir=f"finetuned_models/{checkpoint}-{experiment_id}"
+
+    print("\n\n---------------------------------------------")
+    print("Starting experiment:", experiment_id)
+    print("With parameters:")
+    print(f"Checkpoint: {checkpoint}")
+    print(f"Dataset: {dataset_name}")
+    print(f"Loss: {loss_name}")
+    print(f"Learning Rate: {learning_rate}")
+    print(f"Batch Size: {batch_size}")
+    print(f"Epochs: {num_epochs}")
+    print(f"Warmup Ratio: {warmup_ratio}")
+    print(f"Weight Decay: {weight_decay}")
+    print(f"Max Grad Norm: {max_grad_norm}")
+    print(f"FP16: {fp16}")
+    print(f"BF16: {bf16}")
+    print("---------------------------------------------\n")
 
     model = get_model(checkpoint)
     print("Model loaded")
