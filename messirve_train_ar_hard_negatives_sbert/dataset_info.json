@@ -1,0 +1,72 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "ar",
+  "dataset_name": "messirve",
+  "dataset_size": 16102517,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/spanish-ir/messirve@13315db5159823daa4a0a550870d524b13699b25/ar/train-00000-of-00001.parquet": {
+      "num_bytes": 5692313,
+      "checksum": null
+    },
+    "hf://datasets/spanish-ir/messirve@13315db5159823daa4a0a550870d524b13699b25/ar/test-00000-of-00001.parquet": {
+      "num_bytes": 1591303,
+      "checksum": null
+    }
+  },
+  "download_size": 7283616,
+  "features": {
+    "anchor": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "positive": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "negative_1": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "negative_2": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "negative_3": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "negative_4": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "negative_5": {
+      "dtype": "string",
+      "_type": "Value"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 23386133,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 12922651,
+      "num_examples": 22560,
+      "dataset_name": "messirve"
+    },
+    "test": {
+      "name": "test",
+      "num_bytes": 3179866,
+      "num_examples": 5481,
+      "dataset_name": "messirve"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}
