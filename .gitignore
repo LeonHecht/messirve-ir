@@ -47,3 +47,7 @@ multirun/
 *.csv
 
 *.lsf
+
+checkpoints/
+
+experiment_logs/

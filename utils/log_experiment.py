@@ -1,12 +1,10 @@
 import os
 from datetime import datetime
 
-STORAGE_DIR = "/tmpu/helga_g/leonh_a/messirve-ir"  # Change this path based on the environment
-output_dir = os.path.join(STORAGE_DIR, "experiment_logs")
-os.makedirs(output_dir, exist_ok=True)
+STORAGE_DIR = os.getenv("STORAGE_DIR")
 
 
-def log_md(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name, training_results, ir_metrics):
+def log_md(exp_dir, exp_id, model_name, dataset_name, loss_name, training_args, gpu_name, training_results, ir_metrics):
     # Define experiment parameters
     experiment_date = datetime.now().strftime('%Y-%m-%d')
 
@@ -50,7 +48,7 @@ def log_md(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name,
 ### Observations:
 (Write observations here manually)
     """
-    filename = os.path.join(output_dir, f"{exp_id}.md")
+    filename = os.path.join(exp_dir, f"{exp_id}.md")
 
     # Write to file
     with open(filename, "w") as file:
@@ -125,10 +123,10 @@ def log_csv(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name
 
 import matplotlib.pyplot as plt
 
-def log_plot(exp_id, training_results):
+def log_plot(exp_dir, exp_id, training_results):
     """Plots training and evaluation loss curves and saves them to a file."""
   
-    filename = os.path.join(output_dir, f"{exp_id}.png")
+    filename = os.path.join(exp_dir, f"{exp_id}.png")
     
     # Ensure the directory exists
     os.makedirs(os.path.dirname(filename), exist_ok=True)

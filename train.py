@@ -1,8 +1,12 @@
 import sys
 print(sys.executable)
 import os
-# Define storage location: Change this to "/tmpu/$USER" for clusters or "$HOME" for local use
-STORAGE_DIR = os.getenv("STORAGE_DIR", f"/tmpu/{os.getenv('USER')}")
+# Define storage location for datasets, models and results
+# For Miztli cluster: f"/tmpu/helga_g/{os.getenv('USER')}/messirve-ir"
+# For linux server: "/media/discoexterno/leon/messirve-ir"
+
+STORAGE_DIR = os.getenv("STORAGE_DIR")
+print(f"STORAGE_DIR: {STORAGE_DIR}")
 # STORAGE_DIR = os.getenv("STORAGE_DIR", "$HOME/tesis/messirve-ir")
 import json
 from datetime import datetime
@@ -28,6 +32,17 @@ import evaluation
 print("All imports successful")
 
 
+def make_log_dir():
+    os.makedirs(os.path.join(STORAGE_DIR, "experiment_logs"), exist_ok=True)
+    # make a directory with the format YYYY-MM-DD for todays experiments
+    today_dir = datetime.now().strftime("%Y-%m-%d")
+    os.makedirs(os.path.join(STORAGE_DIR, "experiment_logs", today_dir), exist_ok=True)
+    # make a directory with the format HH-MM-SS for the current experiment
+    experiment_dir = datetime.now().strftime("%H-%M-%S")
+    os.makedirs(os.path.join(STORAGE_DIR, "experiment_logs", today_dir, experiment_dir), exist_ok=True)
+    return os.path.join(STORAGE_DIR, "experiment_logs", today_dir, experiment_dir)
+
+
 def get_model(checkpoint):
     # 1. Load a model to finetune with 2. (Optional) model card data
     model = SentenceTransformer(
@@ -40,15 +55,15 @@ def get_model(checkpoint):
 
 
 def get_dataset():
-    train_path = os.path.join(STORAGE_DIR, "messirve_train_ar_hard_negatives_sbert")
-    eval_path = os.path.join(STORAGE_DIR, "messirve_test_ar_hard_negatives_sbert")
+    train_path = os.path.join(STORAGE_DIR, "datasets", "messirve_train_ar_hard_negatives_sbert")
+    eval_path = os.path.join(STORAGE_DIR, "datasets", "messirve_test_ar_hard_negatives_sbert")
     train_dataset = load_from_disk(train_path)
     eval_dataset = load_from_disk(eval_path)
 
-    # # cut train dataset to 1000 samples
-    # train_dataset = train_dataset.select(range(1000))
-    # # cut eval dataset to 300 samples
-    # eval_dataset = eval_dataset.select(range(300))
+    # cut train dataset to 1000 samples
+    train_dataset = train_dataset.select(range(1000))
+    # cut eval dataset to 300 samples
+    eval_dataset = eval_dataset.select(range(300))
     
     return train_dataset, eval_dataset
 
@@ -96,6 +111,9 @@ def extract_training_metrics(output_dir):
 
 @hydra.main(config_path=".", config_name="config")
 def train(cfg: DictConfig):
+    
+    experiment_dir = make_log_dir()
+
     # Access parameters from the Hydra config
     checkpoint = cfg.experiment.checkpoint
     dataset_name = cfg.experiment.dataset_name
@@ -112,8 +130,7 @@ def train(cfg: DictConfig):
     save_steps = cfg.experiment.save_steps
 
     experiment_id = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    # output_dir=f"finetuned_models/{checkpoint}-{experiment_id}"
-    output_dir = os.path.join(STORAGE_DIR, "checkpoints", f"{checkpoint}-{experiment_id}")
+    output_dir = os.path.join(experiment_dir, "checkpoints", f"{checkpoint}")
     os.makedirs(output_dir, exist_ok=True)
 
     print("\n\n---------------------------------------------")
@@ -188,12 +205,12 @@ def train(cfg: DictConfig):
     loss_name = "MultipleNegativesRankingLoss"
     hardware = torch.cuda.get_device_name(0)
     model_name = checkpoint.split("/")[-1]
-    log_experiment.log_md(experiment_id, model_name, dataset_name, loss_name, args.to_dict(), hardware, training_metrics, ir_metrics)
+    log_experiment.log_md(experiment_dir, experiment_id, model_name, dataset_name, loss_name, args.to_dict(), hardware, training_metrics, ir_metrics)
     log_experiment.log_csv(experiment_id, model_name, dataset_name, loss_name, args.to_dict(), hardware, training_metrics, ir_metrics)
-    log_experiment.log_plot(experiment_id, training_metrics)
+    log_experiment.log_plot(experiment_dir, experiment_id, training_metrics)
 
     # 8. Save the trained model
-    model_save_path = f"finetuned_models/{model_name}-{experiment_id}"
+    model_save_path = os.path.join(experiment_dir, "finetuned_models", f"{model_name}-{experiment_id}")
     os.makedirs(model_save_path, exist_ok=True)
     model.save_pretrained(model_save_path)
     print(f"Model saved to: {model_save_path}")
