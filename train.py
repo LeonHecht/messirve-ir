@@ -44,13 +44,17 @@ def make_log_dir():
 
 
 def get_model(checkpoint):
+    from sentence_transformers.models import Transformer
+    from sentence_transformers import SentenceTransformer
+    from transformers import AutoModel
     # 1. Load a model to finetune with 2. (Optional) model card data
-    model = SentenceTransformer(
-        checkpoint,
-        model_card_data=SentenceTransformerModelCardData(
-            license="apache-2.0"
-        )
-    )
+    # model = SentenceTransformer(
+    #     checkpoint,
+    #     model_card_data=SentenceTransformerModelCardData(
+    #         license="apache-2.0"
+    #     )
+    # )
+    model = SentenceTransformer(checkpoint)
     return model
 
 
@@ -60,10 +64,10 @@ def get_dataset():
     train_dataset = load_from_disk(train_path)
     eval_dataset = load_from_disk(eval_path)
 
-    # cut train dataset to 1000 samples
-    train_dataset = train_dataset.select(range(1000))
-    # cut eval dataset to 300 samples
-    eval_dataset = eval_dataset.select(range(300))
+    # # cut train dataset to 1000 samples
+    # train_dataset = train_dataset.select(range(1000))
+    # # cut eval dataset to 300 samples
+    # eval_dataset = eval_dataset.select(range(300))
     
     return train_dataset, eval_dataset
 

@@ -1,4 +1,4 @@
-from datasets import load_dataset
+from datasets import load_from_disk
 import random
 import json
 from tqdm import tqdm
@@ -7,55 +7,56 @@ print(sys.executable)
 import pickle
 
 
-def get_negatives(train_ds, query_id, k):
+def get_negatives(ds, query_id, k):
     """ Randomly sample negatives from the dataset."""
     indices = []
     while len(indices) < k:
-        rand_i = random.randint(0, len(train_ds)-1)
-        if rand_i not in indices and train_ds[rand_i]["id"] != query_id:
+        rand_i = random.randint(0, len(ds)-1)
+        if rand_i not in indices and ds[rand_i]["id"] != query_id:
             indices.append(rand_i)
     # Use a generator to filter out examples with the given query_id
-    negs = [train_ds[i]["docid_text"] for i in indices]
+    negs = [ds[i]["docid_text"] for i in indices]
     return negs
     
 
-def convert():
-    country = "ar"
-    ds = load_dataset("spanish-ir/messirve", country)
+def convert(split):
+    print("Loading dataset...", end="")
+    ds = load_from_disk("messirve_ar")
+    print("Done")
 
-    with open("hard_negatives_2000_bge_ar.pkl", "rb") as f:
-        print("Loading hard negatives...", end="")
+    print("Loading hard negatives...", end="")
+    with open("hard_negatives_test_bge_ar.pkl", "rb") as f:
         hard_negatives = pickle.load(f)
         print("Done")
 
     # ['id', 'query', 'docid', 'docid_text', 'query_date', 'answer_date', 'match_score', 'expanded_search', 'answer_type']
-    train_ds = ds["train"][:2000]
+    ds = ds[split]
 
     # {"query": str, "pos": List[str], "neg":List[str], "pos_scores": List[int], "neg_scores": List[int], "prompt": str, "type": str}
     json_out = []
 
-    for i in tqdm(range(len(train_ds["id"])), total=len(train_ds["id"])):
-        query = train_ds["query"][i]
-        query_id = train_ds["id"][i]
-        docid_text = train_ds["docid_text"][i]
-        doc_id = train_ds["docid"][i]
+    for i in tqdm(range(len(ds["query"])), total=len(ds["query"])):
+        query = ds["query"][i]
+        query_id = ds["id"][i]
+        docid_text = ds["docid_text"][i]
+        doc_id = ds["docid"][i]
 
-        # negs = get_negatives(train_ds, query_id, k=10)
-        neg_doc_ids = hard_negatives[str(query_id)]
-        assert len(neg_doc_ids) == 15
-        negs = []
-        for j in range(len(train_ds["id"])):
-            if train_ds["docid"][j] in neg_doc_ids:
-                text = train_ds["docid_text"][j]
-                if text not in negs:
-                    negs.append(text)
+        # negs = get_negatives(ds, query_id, k=10)
+        neg_doc_ids = hard_negatives[str(query_id)]     # hard_negatives = {query_id: [doc_id1, doc_id2, ...]}
+        # get the text of the negativess
+        neg_doc_indices = []
+        for j in range(len(ds["id"])):
+            if ds["docid"][j] in neg_doc_ids:
+                neg_doc_indices.append(j)
+        
+        negs = [ds[index]["docid_text"] for index in neg_doc_indices if ds[index]["docid_text"] not in negs]        
         assert len(negs) == 15
         
         if query not in json_out:
             json_out.append({"query": query, "pos": [docid_text], "neg": negs, "neg_scores": [], "prompt": "", "type": ""})
 
     # dump json_dict to file
-    with open("messirve_2000.json", "w", encoding="utf-8") as f:
+    with open("messirve_test_ar_bge_finetune.json", "w", encoding="utf-8") as f:
         for line in json_out:
             json.dump(line, f, ensure_ascii=False)
             f.write("\n")
@@ -69,7 +70,7 @@ def finetune():
 	-m FlagEmbedding.finetune.embedder.encoder_only.m3 \
 	--model_name_or_path BAAI/bge-m3 \
     --cache_dir ./cache/model \
-    --train_data ./messirve_2000.json\
+    --train_data ./messirve.json\
     --cache_path ./cache/data \
     --train_group_size 8 \
     --query_max_len 256 \
@@ -83,13 +84,12 @@ def finetune():
     --output_dir ./test_encoder_only_m3_bge-m3_sd \
     --overwrite_output_dir \
     --learning_rate 5e-6 \
-    --fp16 \
     --num_train_epochs 2 \
     --per_device_train_batch_size 1 \
     --dataloader_drop_last True \
     --warmup_ratio 0.1 \
     --gradient_checkpointing \
-    --logging_steps 1 \
+    --logging_steps 20 \
     --save_steps 1000 \
     --negatives_cross_device \
     --temperature 0.02 \
@@ -99,11 +99,13 @@ def finetune():
     --unified_finetuning True \
     --use_self_distill True \
     --fix_encoder False \
-    --self_distill_start_step 0"""
+    --self_distill_start_step 0 \
+    --max_grad_norm 1000"""
+    # --fp16 \
 
     # execute command in terminal
     os.system(command)
 
 if __name__ == "__main__":
-    # convert()
+    # convert("test")
     finetune()
