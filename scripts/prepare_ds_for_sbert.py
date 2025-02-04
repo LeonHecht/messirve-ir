@@ -4,13 +4,15 @@ from datasets import load_from_disk, load_dataset
 # Expand the 'hard_negatives' column
 def expand_hard_negatives(example):
     # Ensure a fixed length of 5
-    num_negs = 5
-    assert len(example['hard_negatives']) == num_negs, f"Hard negatives have to be exactly {num_negs}"
+    num_negs = 1
+    # assert len(example['hard_negatives']) == num_negs, f"Hard negatives have to be exactly {num_negs}"
     negatives = example['hard_negatives']
     
-    # Create new keys for each negative
-    return {f"negative_{i+1}": negatives[i] for i in range(num_negs)}
-
+    if num_negs > 1:
+        # Create new keys for each negative
+        return {f"negative_{i+1}": negatives[i] for i in range(num_negs)}
+    else:
+        return {"negative": negatives[0]}
 
 def prepare(split):
     assert split in ["train", "test"], "Split should be either 'train' or 'test'"
@@ -39,8 +41,10 @@ def prepare(split):
     # Rename docid_text column to 'positive'
     ds = ds.rename_column("docid_text", "positive")
 
+    df = ds.to_pandas()
+
     # Save the dataset
-    ds.save_to_disk(f"messirve_{split}_{country}_hard_negatives_sbert")
+    ds.save_to_disk(f"messirve_{split}_{country}_hard_negatives1_sbert")
 
 
 if __name__ == "__main__":

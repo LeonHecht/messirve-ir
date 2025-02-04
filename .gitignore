@@ -51,3 +51,5 @@ multirun/
 checkpoints/
 
 experiment_logs/
+
+results_cross_encoder_90_f1/

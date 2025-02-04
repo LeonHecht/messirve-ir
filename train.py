@@ -37,6 +37,7 @@ from sentence_transformers import (
     SentenceTransformerModelCardData,
 )
 from sentence_transformers.losses import MultipleNegativesRankingLoss
+from sentence_transformers.losses import TripletLoss
 from sentence_transformers.training_args import BatchSamplers
 from sentence_transformers.evaluation import TripletEvaluator
 
@@ -81,8 +82,8 @@ def get_model(checkpoint):
 
 
 def get_dataset():
-    train_path = os.path.join(STORAGE_DIR, "datasets", "messirve_train_ar_hard_negatives_sbert")
-    eval_path = os.path.join(STORAGE_DIR, "datasets", "messirve_test_ar_hard_negatives_sbert")
+    train_path = os.path.join(STORAGE_DIR, "datasets", "messirve_train_ar_hard_negatives1_sbert")
+    eval_path = os.path.join(STORAGE_DIR, "datasets", "messirve_test_ar_hard_negatives1_sbert")
     train_dataset = load_from_disk(train_path)
     eval_dataset = load_from_disk(eval_path)
 
@@ -95,15 +96,15 @@ def get_dataset():
 
 
 def get_evaluator(eval_dataset, model):
-    # # 6. (Optional) Create an evaluator & evaluate the base model
-    # dev_evaluator = TripletEvaluator(
-    #     anchors=eval_dataset["anchor"],
-    #     positives=eval_dataset["positive"],
-    #     negatives=eval_dataset["negative"],
-    #     name="all-nli-dev",
-    # )
-    # dev_evaluator(model)
-    return None
+    # 6. (Optional) Create an evaluator & evaluate the base model
+    dev_evaluator = TripletEvaluator(
+        anchors=eval_dataset["anchor"],
+        positives=eval_dataset["positive"],
+        negatives=eval_dataset["negative"],
+        name="messIRve",
+    )
+    dev_evaluator(model)
+    return dev_evaluator
 
 
 def get_trainer(model, args, train_dataset, eval_dataset, loss, dev_evaluator):
@@ -180,6 +181,7 @@ def train(cfg: DictConfig):
     train_dataset, eval_dataset = get_dataset()
     logger.info("Datasets loaded")
     loss = MultipleNegativesRankingLoss(model)
+    # loss = TripletLoss(model)
     logger.info("Loss function defined")
 
     args = SentenceTransformerTrainingArguments(
