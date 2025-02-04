@@ -29,6 +29,9 @@ from omegaconf import DictConfig
 
 import evaluation
 
+# make only gpu1 visible
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 print("All imports successful")
 
 
@@ -54,7 +57,8 @@ def get_model(checkpoint):
     #         license="apache-2.0"
     #     )
     # )
-    model = SentenceTransformer(checkpoint)
+    # model = SentenceTransformer(checkpoint)
+    model = SentenceTransformer(checkpoint, trust_remote_code=True, model_kwargs={'lora_main_params_trainable': True})
     return model
 
 
@@ -180,7 +184,7 @@ def train(cfg: DictConfig):
         save_strategy="steps",
         save_steps=save_steps,
         save_total_limit=1,
-        logging_steps=20,
+        logging_steps=40,
         # run_name="distiluse-base-multilingual-cased-v2-5-HN",  # Will be used in W&B if `wandb` is installed
     )
     print("Training arguments defined")

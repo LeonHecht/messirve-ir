@@ -338,7 +338,7 @@ def main():
     }
 
     test_pred_labels = run(
-        model_checkpoint, 4,
+        model_checkpoint, 2,
         train_texts, val_texts, test_texts,
         y_train, y_val, y_test,
         hyperparameters=hyperparameters

@@ -1,18 +1,19 @@
 experiment:
   # checkpoint: "sentence-transformers/distiluse-base-multilingual-cased-v2"  # Pretrained model checkpoint
-  checkpoint: "distilbert/distilbert-base-multilingual-cased"  # Pretrained model checkpoint
+  # checkpoint: "distilbert/distilbert-base-multilingual-cased"  # Pretrained model checkpoint
+  checkpoint: "jinaai/jina-embeddings-v3"  # Pretrained model checkpoint
   # checkpoint: "BAAI/bge-m3"  # Pretrained model checkpoint
   dataset_name: "messirve_ar_hard_negatives5_sbert"  # Dataset name (used for logging, not loading)
   loss_name: "MultipleNegativesRankingLoss"  # Loss function name (used for logging)
-  learning_rate: 5e-6  # Initial learning rate
-  batch_size: 8  # Training and evaluation batch size
-  num_epochs: 3  # Total number of training epochs
+  learning_rate: 2e-6  # Initial learning rate
+  batch_size: 16  # Training and evaluation batch size
+  num_epochs: 2  # Total number of training epochs
   warmup_ratio: 0.1  # Warmup ratio for the learning rate scheduler
   weight_decay: 0.01  # Weight decay
   max_grad_norm: 30  # Maximum gradient norm for clipping
-  fp16: True  # Enable mixed precision (FP16) training
+  fp16: False  # Enable mixed precision (FP16) training
   bf16: False  # Enable BF16 precision training (overrides FP16 if supported)
-  eval_steps: 200  # Perform evaluation every N steps
+  eval_steps: 500  # Perform evaluation every N steps
   save_steps: 400  # Save the model every N steps
 
 hydra:
