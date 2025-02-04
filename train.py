@@ -1,12 +1,30 @@
+import logging
+
+# Create or get a logger
+logger = logging.getLogger('my_logger')
+logger.setLevel(logging.INFO)  # Set the desired logging level
+
+# Create a file handler that writes log messages to a file
+# handler = logging.FileHandler('my_log_file.log')
+handler = logging.StreamHandler()
+handler.setLevel(logging.INFO)  # Set the level for the file handler
+
+# Create a formatter and set it for the file handler
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+
+# Add the file handler to the logger
+logger.addHandler(handler)
+
 import sys
-print(sys.executable)
+logger.info(sys.executable)
 import os
 # Define storage location for datasets, models and results
 # For Miztli cluster: f"/tmpu/helga_g/{os.getenv('USER')}/messirve-ir"
 # For linux server: "/media/discoexterno/leon/messirve-ir"
 
 STORAGE_DIR = os.getenv("STORAGE_DIR")
-print(f"STORAGE_DIR: {STORAGE_DIR}")
+logger.info(f"STORAGE_DIR: {STORAGE_DIR}")
 # STORAGE_DIR = os.getenv("STORAGE_DIR", "$HOME/tesis/messirve-ir")
 import json
 from datetime import datetime
@@ -32,7 +50,7 @@ import evaluation
 # make only gpu1 visible
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-print("All imports successful")
+logger.info("All imports successful")
 
 
 def make_log_dir():
@@ -141,28 +159,28 @@ def train(cfg: DictConfig):
     output_dir = os.path.join(experiment_dir, "checkpoints", f"{checkpoint}")
     os.makedirs(output_dir, exist_ok=True)
 
-    print("\n\n---------------------------------------------")
-    print("Starting experiment:", experiment_id)
-    print("With parameters:")
-    print(f"Checkpoint: {checkpoint}")
-    print(f"Dataset: {dataset_name}")
-    print(f"Loss: {loss_name}")
-    print(f"Learning Rate: {learning_rate}")
-    print(f"Batch Size: {batch_size}")
-    print(f"Epochs: {num_epochs}")
-    print(f"Warmup Ratio: {warmup_ratio}")
-    print(f"Weight Decay: {weight_decay}")
-    print(f"Max Grad Norm: {max_grad_norm}")
-    print(f"FP16: {fp16}")
-    print(f"BF16: {bf16}")
-    print("---------------------------------------------\n")
+    logger.info("\n\n---------------------------------------------")
+    logger.info("Starting experiment:", experiment_id)
+    logger.info("With parameters:")
+    logger.info(f"Checkpoint: {checkpoint}")
+    logger.info(f"Dataset: {dataset_name}")
+    logger.info(f"Loss: {loss_name}")
+    logger.info(f"Learning Rate: {learning_rate}")
+    logger.info(f"Batch Size: {batch_size}")
+    logger.info(f"Epochs: {num_epochs}")
+    logger.info(f"Warmup Ratio: {warmup_ratio}")
+    logger.info(f"Weight Decay: {weight_decay}")
+    logger.info(f"Max Grad Norm: {max_grad_norm}")
+    logger.info(f"FP16: {fp16}")
+    logger.info(f"BF16: {bf16}")
+    logger.info("---------------------------------------------\n")
 
     model = get_model(checkpoint)
-    print("Model loaded")
+    logger.info("Model loaded")
     train_dataset, eval_dataset = get_dataset()
-    print("Datasets loaded")
+    logger.info("Datasets loaded")
     loss = MultipleNegativesRankingLoss(model)
-    print("Loss function defined")
+    logger.info("Loss function defined")
 
     args = SentenceTransformerTrainingArguments(
         # Required parameter:
@@ -187,7 +205,7 @@ def train(cfg: DictConfig):
         logging_steps=40,
         # run_name="distiluse-base-multilingual-cased-v2-5-HN",  # Will be used in W&B if `wandb` is installed
     )
-    print("Training arguments defined")
+    logger.info("Training arguments defined")
 
     dev_evaluator = get_evaluator(eval_dataset, model)
 
@@ -221,7 +239,7 @@ def train(cfg: DictConfig):
     model_save_path = os.path.join(experiment_dir, "finetuned_models", f"{model_name}-{experiment_id}")
     os.makedirs(model_save_path, exist_ok=True)
     model.save_pretrained(model_save_path)
-    print(f"Model saved to: {model_save_path}")
+    logger.info(f"Model saved to: {model_save_path}")
 
     # # 9. (Optional) Push it to the Hugging Face Hub
     # model.push_to_hub("mpnet-base-all-nli-triplet")
