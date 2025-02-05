@@ -5,18 +5,21 @@ from datasets import load_dataset
 import pickle
 import os
 import pytrec_eval
+from sentence_transformers import SentenceTransformer
 import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from utils.retrieval_utils import (
     embed_bge,
     embed_jinja,
     embed_mamba,
     retrieve_bm25,
-    embed_s_transformers
+    embed_s_transformers,
+    rerank_cross_encoder
 )
 
 from models.model_setup import get_bge_m3_model, get_jinja_model
 
-def run(model, metrics, country, model_instance=None, reuse_run=False):
+def run(model, metrics, country, model_instance=None, tokenizer=None, reranker_model=None, reuse_run=False, rerank=False):
     print("Starting Evaluation")
     ds = load_dataset("spanish-ir/messirve", country)
     docs = ds["test"]["docid_text"]
@@ -111,6 +114,11 @@ def run(model, metrics, country, model_instance=None, reuse_run=False):
     else:
         raise ValueError("Model not supported.")
     
+    if rerank:
+        # for each query rerank the top 1000 docs
+        run = rerank_cross_encoder(reranker_model, tokenizer, run, 100, queries, query_ids, docs, doc_ids,
+                                   max_length=512)
+    
     # Evaluate BM25
     # qrels = {query_id: {doc_id: relevance, ...},
     #          query_id: {doc_id: relevance, ...}, ...},
@@ -147,8 +155,12 @@ def run(model, metrics, country, model_instance=None, reuse_run=False):
 
 
 if __name__ == "__main__":
-    # run(model="bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
+    reranker_model = AutoModelForSequenceClassification.from_pretrained("results_cross_encoder_91_f1/checkpoint-11500")
+    model = SentenceTransformer("multirun/2025-01-30/11-45-41/1/finetuned_models/distiluse-base-multilingual-cased-v1-exp_20250130_123521")
+    tokenizer = AutoTokenizer.from_pretrained("FacebookAI/xlm-roberta-base")
+    run(model="sentence-transformer", model_instance=model, metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar", reuse_run=False, rerank=True, reranker_model=reranker_model, tokenizer=tokenizer)
     # run(model="bge", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
-    run(model="bge-finetuned", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar")
+    # run(model="bge-finetuned", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar")
     # run(model="jinja", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
     # run(model="mamba", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
+    # run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", model_instance=model, reuse_run=False)

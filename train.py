@@ -1,20 +1,8 @@
 import logging
-
-# Create or get a logger
-logger = logging.getLogger('my_logger')
-logger.setLevel(logging.INFO)  # Set the desired logging level
-
-# Create a file handler that writes log messages to a file
-# handler = logging.FileHandler('my_log_file.log')
-handler = logging.StreamHandler()
-handler.setLevel(logging.INFO)  # Set the level for the file handler
-
-# Create a formatter and set it for the file handler
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-
-# Add the file handler to the logger
-logger.addHandler(handler)
+logging.basicConfig(
+        format="%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S", level=logging.INFO
+    )
+logger = logging.getLogger(__name__)
 
 import sys
 logger.info(sys.executable)
@@ -49,7 +37,7 @@ from omegaconf import DictConfig
 import evaluation
 
 # make only gpu1 visible
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 logger.info("All imports successful")
 
@@ -76,8 +64,8 @@ def get_model(checkpoint):
     #         license="apache-2.0"
     #     )
     # )
-    # model = SentenceTransformer(checkpoint)
-    model = SentenceTransformer(checkpoint, trust_remote_code=True, model_kwargs={'lora_main_params_trainable': True})
+    model = SentenceTransformer(checkpoint)
+    # model = SentenceTransformer(checkpoint, trust_remote_code=True, model_kwargs={'lora_main_params_trainable': True})
     return model
 
 
@@ -115,7 +103,7 @@ def get_trainer(model, args, train_dataset, eval_dataset, loss, dev_evaluator):
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         loss=loss,
-        evaluator=None,
+        evaluator=dev_evaluator,
     )
     return trainer
 
@@ -155,6 +143,7 @@ def train(cfg: DictConfig):
     bf16 = cfg.experiment.bf16
     eval_steps = cfg.experiment.eval_steps
     save_steps = cfg.experiment.save_steps
+    triplet_margin = cfg.experiment.triplet_margin
 
     experiment_id = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     output_dir = os.path.join(experiment_dir, "checkpoints", f"{checkpoint}")
@@ -174,14 +163,15 @@ def train(cfg: DictConfig):
     logger.info(f"Max Grad Norm: {max_grad_norm}")
     logger.info(f"FP16: {fp16}")
     logger.info(f"BF16: {bf16}")
+    logger.info(f"Triplet Margin: {triplet_margin}")
     logger.info("---------------------------------------------\n")
 
     model = get_model(checkpoint)
     logger.info("Model loaded")
     train_dataset, eval_dataset = get_dataset()
     logger.info("Datasets loaded")
-    loss = MultipleNegativesRankingLoss(model)
-    # loss = TripletLoss(model)
+    # loss = MultipleNegativesRankingLoss(model)
+    loss = TripletLoss(model, triplet_margin=triplet_margin)
     logger.info("Loss function defined")
 
     args = SentenceTransformerTrainingArguments(
