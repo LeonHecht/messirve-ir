@@ -14,8 +14,12 @@ from utils.retrieval_utils import (
     embed_mamba,
     retrieve_bm25,
     embed_s_transformers,
-    rerank_cross_encoder
+    rerank_cross_encoder,
+    embed_qwen
 )
+
+# make only GPU0 visible
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 from models.model_setup import get_bge_m3_model, get_jinja_model
 
@@ -27,6 +31,13 @@ def run(model, metrics, country, model_instance=None, tokenizer=None, reranker_m
     doc_ids = ds["test"]["docid"]
     query_ids = ds["test"]["id"]
     print("Data prepared.")
+
+    # # read corpus from pickle file
+    # with open("/media/discoexterno/leon/messirve-ir/datasets/messIRve_corpus.pkl", "rb") as f:
+    #     corpus = pickle.load(f)
+
+    # docs = corpus["corpus"]["text"]
+    # doc_ids = corpus["corpus"]["docid"]
 
     device = torch.device("cuda")
 
@@ -50,7 +61,7 @@ def run(model, metrics, country, model_instance=None, tokenizer=None, reranker_m
             # checkpoint = 'BAAI/bge-m3-unsupervised'
             # checkpoint = 'BAAI/bge-m3-retromae'
             model = get_bge_m3_model(checkpoint)
-            run = embed_bge(model, docs, queries, doc_ids, query_ids)
+            run = embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run)
             # save run to disk using pickle
             with open(run_path, "wb") as f:
                 print("Dumping run to pickle file...")
@@ -63,7 +74,7 @@ def run(model, metrics, country, model_instance=None, tokenizer=None, reranker_m
         if not os.path.exists(run_path) or not reuse_run:
             model = get_jinja_model()
             model.to(device)
-            run = embed_jinja(model, docs, queries, doc_ids, query_ids)
+            run = embed_jinja(model, docs, queries, doc_ids, query_ids, reuse_run)
             # save run to disk using pickle
             with open(run_path, "wb") as f:
                 print("Dumping run to pickle file...")
@@ -91,7 +102,7 @@ def run(model, metrics, country, model_instance=None, tokenizer=None, reranker_m
             # checkpoint = 'BAAI/bge-m3-unsupervised'
             # checkpoint = 'BAAI/bge-m3-retromae'
             model = get_bge_m3_model(checkpoint)
-            run = embed_bge(model, docs, queries, doc_ids, query_ids)
+            run = embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run)
             # save run to disk using pickle
             with open(run_path, "wb") as f:
                 print("Dumping run to pickle file...")
@@ -111,12 +122,24 @@ def run(model, metrics, country, model_instance=None, tokenizer=None, reranker_m
         else:
             with open(run_path, "rb") as f:
                 run = pickle.load(f)
+    elif model == "qwen":
+        from transformers import AutoModelForCausalLM
+        run_path = f"run_qwen_{country}.pkl"
+        if not os.path.exists(run_path) or not reuse_run:
+            checkpoint = '/media/discoexterno/leon/qwen-2-vec/run_2000_texts/output-model/checkpoint-560'
+            tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-0.5B-Instruct')
+            tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+            model = AutoModelForCausalLM.from_pretrained(checkpoint)
+            model.resize_token_embeddings(len(tokenizer))
+            device = "cuda:0" if torch.cuda.is_available() else "cpu"
+            model.to(device)
+            run = embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids)
     else:
         raise ValueError("Model not supported.")
     
     if rerank:
         # for each query rerank the top 1000 docs
-        run = rerank_cross_encoder(reranker_model, tokenizer, run, 100, queries, query_ids, docs, doc_ids,
+        run = rerank_cross_encoder(reranker_model, tokenizer, run, 50, queries, query_ids, docs, doc_ids,
                                    max_length=512)
     
     # Evaluate BM25
@@ -155,12 +178,14 @@ def run(model, metrics, country, model_instance=None, tokenizer=None, reranker_m
 
 
 if __name__ == "__main__":
-    reranker_model = AutoModelForSequenceClassification.from_pretrained("results_cross_encoder_91_f1/checkpoint-11500")
-    model = SentenceTransformer("multirun/2025-01-30/11-45-41/1/finetuned_models/distiluse-base-multilingual-cased-v1-exp_20250130_123521")
-    tokenizer = AutoTokenizer.from_pretrained("FacebookAI/xlm-roberta-base")
-    run(model="sentence-transformer", model_instance=model, metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar", reuse_run=False, rerank=True, reranker_model=reranker_model, tokenizer=tokenizer)
-    # run(model="bge", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
+    # reranker_model = AutoModelForSequenceClassification.from_pretrained("results_cross_encoder_91_f1/checkpoint-11500")
+    # model = SentenceTransformer("multirun/2025-01-30/11-45-41/1/finetuned_models/distiluse-base-multilingual-cased-v1-exp_20250130_123521")
+    model = SentenceTransformer("sentence-transformers/distiluse-base-multilingual-cased-v2")
+    # tokenizer = AutoTokenizer.from_pretrained("FacebookAI/xlm-roberta-base")
+    run(model="sentence-transformer", model_instance=model, metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False, rerank=False)
+    # run(model="qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False)
     # run(model="bge-finetuned", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar")
     # run(model="jinja", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
     # run(model="mamba", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
     # run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", model_instance=model, reuse_run=False)
+    # run("bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False)

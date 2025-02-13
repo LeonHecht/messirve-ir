@@ -1,6 +1,6 @@
 from models.model_setup import get_mamba_model, get_auto_model
 from datasets import load_from_disk
-from trainers.info_nce_trainer import InfoNCERetrievalTrainerHN
+from trainers.info_nce_trainer import InfoNCERetrievalTrainerHNLLM
 from transformers import (
     DataCollatorWithPadding,
     Trainer,
@@ -9,43 +9,69 @@ from transformers import (
 import torch
 from torch.nn.utils.rnn import pad_sequence
 import pickle
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+import os
+# make only GPU0 visible
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+STORAGE_DIR = os.getenv("STORAGE_DIR", "/media/discoexterno/leon")
+
+MAX_QUERY_LEN = 128
+MAX_DOC_LEN = 1024
 
 
-def tokenize_with_hard_negatives(tokenizer, examples):
+def tokenize_with_hard_negatives(tokenizer, examples, append_eos=False):
+    # Append the EOS token to queries and documents
+    if append_eos:
+        examples["query"] = [q + tokenizer.eos_token for q in examples["query"]]
+        examples["docid_text"] = [d + tokenizer.eos_token for d in examples["docid_text"]]
+        examples["hard_negatives"] = [
+            [neg + tokenizer.eos_token for neg in neg_list]
+            for neg_list in examples["hard_negatives"]
+        ]
+
     # Flatten the list of hard negatives for tokenization
-    flattened_negatives = [doc for hard_neg_docs in examples["hard_negatives"] for doc in hard_neg_docs]
+    flattened_negatives = []
+    for hard_neg_docs in examples["hard_negatives"]:
+        flattened_negatives.extend(hard_neg_docs)
     
     # Tokenize queries
     tokenized_queries = tokenizer(
-        examples["query"], truncation=True, padding=True, max_length=128
+        examples["query"], truncation=True, padding=True, max_length=MAX_QUERY_LEN
     )
     
     # Tokenize positive documents
     tokenized_docs = tokenizer(
-        examples["docid_text"], truncation=True, padding=True, max_length=512
+        examples["docid_text"], truncation=True, padding=True, max_length=MAX_DOC_LEN
     )
     
     # Tokenize hard negatives (flattened)
-    tokenized_negatives = tokenizer(
-        flattened_negatives, truncation=True, padding=True, max_length=512
+    tokenized_all_negatives = tokenizer(
+        flattened_negatives, truncation=True, padding=True, max_length=MAX_DOC_LEN
     )
     
-    # Reshape the tokenized negatives back to the original structure
-    tokenized_negatives = {
-        key: [
-            tokenized_negatives[key][i : i + len(hard_neg_docs)]
-            for i, hard_neg_docs in enumerate(examples["hard_negatives"])
-        ]
-        for key in tokenized_negatives
-    }
+    # Rolling index to rebuild the structure
+    rolling_index = 0
+    neg_input_ids = []
+    neg_attention_masks = []
+    for neg_list in examples["hard_negatives"]:
+        length = len(neg_list)
+        neg_input_ids.append(
+            tokenized_all_negatives["input_ids"][rolling_index : rolling_index + length]
+        )
+        neg_attention_masks.append(
+            tokenized_all_negatives["attention_mask"][rolling_index : rolling_index + length]
+        )
+        rolling_index += length
     
     return {
         "query_input_ids": tokenized_queries["input_ids"],
         "query_attention_mask": tokenized_queries["attention_mask"],
         "doc_input_ids": tokenized_docs["input_ids"],
         "doc_attention_mask": tokenized_docs["attention_mask"],
-        "neg_input_ids": tokenized_negatives["input_ids"],
-        "neg_attention_mask": tokenized_negatives["attention_mask"],
+        "neg_input_ids": neg_input_ids,
+        "neg_attention_mask": neg_attention_masks,
     }
 
 
@@ -114,16 +140,18 @@ def train():
     # load train_df from disk
     train_ds = load_from_disk(f"messirve_train_{country}_hard_negatives")
 
-    train_ds = train_ds.select(range(5000))
+    # train_ds = train_ds.select(range(5000))
     test_ds = ds["test"]
 
-    checkpoint = "distilbert/distilbert-base-multilingual-cased"
+    checkpoint = STORAGE_DIR + "/qwen-2-vec/run_89622_texts_1_epoch/output-model/checkpoint-2500"
 
     # model, tokenizer = get_mamba_model()
-    model, tokenizer = get_auto_model(checkpoint)
+    # model, tokenizer = get_auto_model(checkpoint)
+    model = AutoModelForCausalLM.from_pretrained(checkpoint)
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
 
     # Apply tokenization to the dataset
-    train_ds = train_ds.map(lambda x: tokenize_with_hard_negatives(tokenizer, x), batched=True)
+    train_ds = train_ds.map(lambda x: tokenize_with_hard_negatives(tokenizer, x, append_eos=True), batched=True)
     test_ds = test_ds.map(lambda x: tokenize_function(tokenizer, x, append_eos=False), batched=True)
 
     # check if first token is CLS
@@ -148,22 +176,25 @@ def train():
     # Define TrainingArguments
     training_args = TrainingArguments(
         output_dir="./results",           # Directory to save checkpoints
-        evaluation_strategy="epoch",     # Evaluate at the end of each epoch
+        evaluation_strategy="steps",     # Evaluate at the end of each epoch
+        eval_steps=500,                  # Evaluate every 500 steps
         learning_rate=1e-5,              # Learning rate
         per_device_train_batch_size=2,  # Batch size for training
         per_device_eval_batch_size=2,   # Batch size for evaluation
+        gradient_accumulation_steps=4,
         num_train_epochs=3,              # Number of epochs
         weight_decay=0.01,               # Weight decay
+        max_grad_norm=30,                # Maximum gradient norm
         save_strategy="epoch",           # Save model checkpoints at the end of each epoch
         logging_dir="./logs",            # Directory for logs
         logging_steps=10,                # Log every 10 steps
         save_total_limit=1,              # Save only the last checkpoint
         remove_unused_columns=False,
-        warmup_steps=500
+        warmup_ratio=0.1,
     )
 
     # Create Trainer Instance
-    trainer = InfoNCERetrievalTrainerHN(
+    trainer = InfoNCERetrievalTrainerHNLLM(
         model=model,
         args=training_args,
         train_dataset=train_ds,     # Raw dataset for training

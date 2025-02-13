@@ -124,6 +124,25 @@ def extract_training_metrics(output_dir):
     return training_results
 
 
+def log_params(cfg, exp_id):
+    logger.info("\n\n---------------------------------------------")
+    logger.info("Starting experiment:", exp_id)
+    logger.info("With parameters:")
+    logger.info(f"Checkpoint: {cfg.experiment.checkpoint}")
+    logger.info(f"Dataset: {cfg.experiment.dataset_name}")
+    logger.info(f"Loss: {cfg.experiment.loss_name}")
+    logger.info(f"Learning Rate: {cfg.experiment.learning_rate}")
+    logger.info(f"Batch Size: {cfg.experiment.batch_size}")
+    logger.info(f"Epochs: {cfg.experiment.num_epochs}")
+    logger.info(f"Warmup Ratio: {cfg.experiment.warmup_ratio}")
+    logger.info(f"Weight Decay: {cfg.experiment.weight_decay}")
+    logger.info(f"Max Grad Norm: {cfg.experiment.max_grad_norm}")
+    logger.info(f"FP16: {cfg.experiment.fp16}")
+    logger.info(f"BF16: {cfg.experiment.bf16}")
+    logger.info(f"Triplet Margin: {cfg.experiment.triplet_margin}")
+    logger.info("---------------------------------------------\n")
+
+
 @hydra.main(config_path=".", config_name="config")
 def train(cfg: DictConfig):
     
@@ -149,23 +168,8 @@ def train(cfg: DictConfig):
     output_dir = os.path.join(experiment_dir, "checkpoints", f"{checkpoint}")
     os.makedirs(output_dir, exist_ok=True)
 
-    logger.info("\n\n---------------------------------------------")
-    logger.info("Starting experiment:", experiment_id)
-    logger.info("With parameters:")
-    logger.info(f"Checkpoint: {checkpoint}")
-    logger.info(f"Dataset: {dataset_name}")
-    logger.info(f"Loss: {loss_name}")
-    logger.info(f"Learning Rate: {learning_rate}")
-    logger.info(f"Batch Size: {batch_size}")
-    logger.info(f"Epochs: {num_epochs}")
-    logger.info(f"Warmup Ratio: {warmup_ratio}")
-    logger.info(f"Weight Decay: {weight_decay}")
-    logger.info(f"Max Grad Norm: {max_grad_norm}")
-    logger.info(f"FP16: {fp16}")
-    logger.info(f"BF16: {bf16}")
-    logger.info(f"Triplet Margin: {triplet_margin}")
-    logger.info("---------------------------------------------\n")
-
+    log_params(cfg, experiment_id)
+    
     model = get_model(checkpoint)
     logger.info("Model loaded")
     train_dataset, eval_dataset = get_dataset()

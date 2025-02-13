@@ -9,13 +9,12 @@ MAX_DOC_LEN = 2048
 
 
 def retrieve(query_ids, doc_ids, similarity):
-    print("Creating run...", end="")
     run = {}
-    for i in range(len(query_ids)):
+    for i in tqdm(range(len(query_ids)), desc="Creating run"):
         query_sim = similarity[i]
         
         run[str(query_ids[i])] = {str(doc_ids[j]): float(query_sim[j]) for j in range(len(doc_ids))}
-    print("Done.")
+    print("Run created.")
     return run
 
 
@@ -57,7 +56,7 @@ def compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs, 
     return retrieve(query_ids, doc_ids, similarity)
 
 
-def embed_jinja(model, docs, queries, doc_ids, query_ids):
+def embed_jinja(model, docs, queries, doc_ids, query_ids, reuse_run):
     """
     Embed the queries and documents using the Jinja embeddings model and compute the similarity between queries and documents.
     Calls the retrieve function.
@@ -77,7 +76,7 @@ def embed_jinja(model, docs, queries, doc_ids, query_ids):
     embeddings_queries = model.encode(queries, task="retrieval.query", max_length=MAX_QUERY_LEN)
     path = 'corpus/embeddings_corpus_jinja.npy'
 
-    if not os.path.exists(path):
+    if not os.path.exists(path) or not reuse_run:
         embeddings_docs = model.encode(docs, task="retrieval.passage", max_length=MAX_DOC_LEN)
         # save embeddings
         np.save(path, embeddings_docs)
@@ -90,7 +89,7 @@ def embed_jinja(model, docs, queries, doc_ids, query_ids):
     return run
 
 
-def embed_bge(model, docs, queries, doc_ids, query_ids):
+def embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run):
     """
     Embed the queries and documents using the BAAI embeddings models and compute the similarity between queries and documents.
     Calls the retrieve function.
@@ -107,7 +106,7 @@ def embed_bge(model, docs, queries, doc_ids, query_ids):
     embeddings_queries = model.encode(queries, batch_size=8, max_length=MAX_QUERY_LEN)['dense_vecs']
     # Embed entire corpus if file does not exist
     path = 'corpus/embeddings_train_corpus_bge-m3.npy'
-    if not os.path.exists(path):
+    if not os.path.exists(path) or not reuse_run:
         print("Embedding docs...", end="")
         embeddings_docs = model.encode(docs, batch_size=8, max_length=MAX_DOC_LEN)['dense_vecs']    # takes about 7min
         print("Done.")
@@ -120,6 +119,126 @@ def embed_bge(model, docs, queries, doc_ids, query_ids):
         embeddings_docs = np.load(path)
 
     # Compute similarities
+    run = compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs)
+    return run
+
+
+from torch.nn.utils.rnn import pad_sequence
+
+def ensure_eos_and_pad(tokenized, eos_id, max_length, pad_token_id=0):
+    """
+    Ensures each sequence in `tokenized["input_ids"]` ends with EOS if there's space,
+    then re-pads the sequences to a uniform length.
+    """
+    input_ids_list = []
+    attention_mask_list = []
+
+    # Go through each example
+    for seq_ids, seq_mask in tqdm(zip(tokenized["input_ids"], tokenized["attention_mask"]), total=len(tokenized["input_ids"])):
+        seq_ids = seq_ids.tolist()
+        seq_mask = seq_mask.tolist()
+
+        # If there's space, append EOS
+        if len(seq_ids) < max_length:
+            if seq_ids[-1] != eos_id:
+                seq_ids.append(eos_id)
+                seq_mask.append(1)
+
+        # Convert back to tensors
+        input_ids_list.append(torch.tensor(seq_ids, dtype=torch.long))
+        attention_mask_list.append(torch.tensor(seq_mask, dtype=torch.long))
+
+    # Re-pad them to the same length (again)
+    padded_input_ids = pad_sequence(input_ids_list, batch_first=True, padding_value=pad_token_id)
+    padded_attention_mask = pad_sequence(attention_mask_list, batch_first=True, padding_value=0)
+
+    tokenized["input_ids"] = padded_input_ids
+    tokenized["attention_mask"] = padded_attention_mask
+
+
+def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
+    """
+    Embed the queries and documents using the BAAI embeddings models and compute the similarity between queries and documents.
+    Calls the retrieve function.
+
+    Args:
+        model: BAAI embeddings model.
+        docs (dict): Dictionary with document_id as key and text as value.
+        queries (list): List of queries.
+        top_k (int): Number of most similar documents to retrieve.
+
+    Returns:
+        dict: Dictionary with query as key and a list of tuples of (similarity, document text, doc_id) as value.
+    """
+    from torch.utils.data import DataLoader, TensorDataset
+    batch_size = 4
+    device = next(model.parameters()).device  # Automatically detect model's device
+    print("Device: ", device)
+
+    doc_prompts = [f"{doc} El texto de entrada es: {tokenizer.eos_token}" for doc in docs]  # Construct the prompt
+    query_prompts = [f"{query} El texto de entrada es: {tokenizer.eos_token}" for query in queries]  # Construct the prompt
+
+    inputs_docs = tokenizer(
+        doc_prompts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=1024
+    )
+    inputs_queries = tokenizer(
+        query_prompts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=MAX_QUERY_LEN
+    )
+
+    eos_id = tokenizer.eos_token_id
+    pad_id = tokenizer.pad_token_id
+
+    ensure_eos_and_pad(inputs_docs, eos_id, MAX_DOC_LEN, pad_token_id=pad_id)
+    ensure_eos_and_pad(inputs_queries, eos_id, MAX_QUERY_LEN, pad_token_id=pad_id)
+
+    print("Docs and queries tokenized.")
+
+    # Create DataLoaders for batching
+    doc_dataset = TensorDataset(inputs_docs["input_ids"], inputs_docs["attention_mask"])
+    query_dataset = TensorDataset(inputs_queries["input_ids"], inputs_queries["attention_mask"])
+    doc_loader = DataLoader(doc_dataset, batch_size=batch_size, pin_memory=True)
+    query_loader = DataLoader(query_dataset, batch_size=batch_size, pin_memory=True)
+
+    print("Embedding docs and queries...")
+    embeddings_docs = []
+    with torch.no_grad():
+        for input_ids, attention_mask in tqdm(doc_loader):
+            batch = {"input_ids": input_ids.to(device), "attention_mask": attention_mask.to(device)}
+            output = model(**batch, output_hidden_states=True)
+            hidden_states = output.hidden_states[-1]  # Last hidden layer (batch_size, seq_length, hidden_dim)
+            # Extract the embedding for the <|end_of_text|> token (e_t)
+            eos_positions = (input_ids == tokenizer.eos_token_id).nonzero(as_tuple=True)
+            # Check if eos_positions is empty
+            if eos_positions[0].numel() < input_ids.size(0):
+                raise ValueError("Not all sequences in the batch contain the EOS token.")
+            doc_embeddings = hidden_states[eos_positions]  # Shape: (batch_size, hidden_dim)
+            embeddings_docs.append(doc_embeddings)
+    embeddings_docs = torch.cat(embeddings_docs, dim=0)  # Combine batches
+
+    embeddings_queries = []
+    with torch.no_grad():
+        for input_ids, attention_mask in tqdm(query_loader):
+            batch = {"input_ids": input_ids.to(device), "attention_mask": attention_mask.to(device)}
+            output = model(**batch, output_hidden_states=True)
+            hidden_states = output.hidden_states[-1]  # Last hidden layer (batch_size, seq_length, hidden_dim)
+            # Extract the embedding for the <|end_of_text|> token (e_t)
+            eos_positions = (input_ids == tokenizer.eos_token_id).nonzero(as_tuple=True)
+            # Check if eos_positions is empty
+            if eos_positions[0].numel() < input_ids.size(0):
+                raise ValueError("Not all sequences in the batch contain the EOS token.")
+            query_embeddings = hidden_states[eos_positions]  # Shape: (batch_size, hidden_dim)
+            embeddings_queries.append(query_embeddings)
+    embeddings_queries = torch.cat(embeddings_queries, dim=0)  # Combine batches
+    print("Embeddings done.")
+
     run = compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs)
     return run
 
@@ -212,14 +331,20 @@ def retrieve_bm25(docs, queries, doc_ids, query_ids):
     """
     from rank_bm25 import BM25Okapi
 
+    print("Tokenizing corpus...", end="")
     # Simple space-based tokenization
-    tokenized_corpus = [doc.lower().split() for doc in docs]
+    tokenized_corpus = [doc.lower().split() for doc in tqdm(docs)]
+    print("Done.")
 
+    print("Creating BM25 model...", end="")
     # Create BM25 model
     bm25 = BM25Okapi(tokenized_corpus)
+    print("Done.")
 
+    print("Tokenizing queries...", end="")
     # Queries
-    tokenized_queries = [query.lower().split() for query in queries]
+    tokenized_queries = [query.lower().split() for query in tqdm(queries)]
+    print("Done.")
 
     # key: query, value: (similarity, text, doc_id)
     run = {}
@@ -249,7 +374,7 @@ def merge_reranked_into_full_run(full_run, reranked_run):
     return full_run
 
 
-def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs, doc_ids, max_length, batch_size=32):
+def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs, doc_ids, max_length, batch_size=64):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()  # set the model to evaluation mode
@@ -290,6 +415,6 @@ def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs,
             similarity_scores.extend(batch_similarity)
 
         # Map each document to its similarity score for this query
-        reranked_run[query_id] = {curr_doc_ids[j]: similarity_scores[j] for j in range(len(curr_doc_ids))}
+        reranked_run[query_id] = {curr_doc_ids[j]: float(similarity_scores[j]) for j in range(len(curr_doc_ids))}
 
     return merge_reranked_into_full_run(run, reranked_run)
