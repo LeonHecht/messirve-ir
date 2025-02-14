@@ -15,6 +15,7 @@ def get_eos_embeddings(model, input_ids, attention_mask, tokenizer):
         input_ids=input_ids,
         attention_mask=attention_mask,
         output_hidden_states=True,
+        use_cache=False
     )
     hidden_states = outputs.hidden_states[-1]  # (batch_size, seq_len, hidden_dim)
 

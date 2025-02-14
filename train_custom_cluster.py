@@ -21,8 +21,7 @@ import os
 # make only GPU0 visible
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-STORAGE_DIR = os.getenv("STORAGE_DIR", "/media/discoexterno/leon")
-# STORAGE_DIR = os.getenv("STORAGE_DIR", "/tmpu/helga_g/leonh_a/qwen-2-vec")
+STORAGE_DIR = os.getenv("STORAGE_DIR", "/tmpu/helga_g/leonh_a/qwen-2-vec")
 
 MAX_QUERY_LEN = 64
 MAX_DOC_LEN = 512
@@ -190,53 +189,66 @@ def train():
 
     checkpoint = STORAGE_DIR + "/qwen-2-vec/run_89622_texts_1_epoch/output-model/checkpoint-2500"
 
-    if 'helga_g' in STORAGE_DIR:
-        model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-        lora_config = LoraConfig(
-            r=8,
-            lora_alpha=16,
-            lora_dropout=0.05,
-            bias="none",
-            task_type=TaskType.CAUSAL_LM,
-            target_modules = [
-                "q_proj", "k_proj", "v_proj", "o_proj",
-                "gate_proj", "up_proj", "down_proj",
-            ]
-        )
-        model = get_peft_model(model, lora_config)
-        model.print_trainable_parameters()
-    else:
-        model, tokenizer = FastLanguageModel.from_pretrained(
-            # Can select any from the below:
-            # "unsloth/Qwen2.5-0.5B", "unsloth/Qwen2.5-1.5B", "unsloth/Qwen2.5-3B"
-            # "unsloth/Qwen2.5-14B",  "unsloth/Qwen2.5-32B",  "unsloth/Qwen2.5-72B",
-            # And also all Instruct versions and Math. Coding verisons!
-            model_name = "unsloth/Qwen2.5-7B",
-            max_seq_length = MAX_DOC_LEN,
-            dtype = None,
-            load_in_4bit = False,
-            # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
-        )
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        # Can select any from the below:
+        # "unsloth/Qwen2.5-0.5B", "unsloth/Qwen2.5-1.5B", "unsloth/Qwen2.5-3B"
+        # "unsloth/Qwen2.5-14B",  "unsloth/Qwen2.5-32B",  "unsloth/Qwen2.5-72B",
+        # And also all Instruct versions and Math. Coding verisons!
+        model_name = "unsloth/Qwen2.5-7B",
+        max_seq_length = 512,
+        dtype = None,
+        load_in_4bit = False,
+        # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
+    )
 
-        model = FastLanguageModel.get_peft_model(
-            model,
-            r = 16, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
-            target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
-                            "gate_proj", "up_proj", "down_proj",],
-            lora_alpha = 16,
-            lora_dropout = 0, # Supports any, but = 0 is optimized
-            bias = "none",    # Supports any, but = "none" is optimized
-            # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
-            # use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
-            random_state = 3407,
-            use_rslora = False,  # We support rank stabilized LoRA
-            loftq_config = None, # And LoftQ
-        )
+    model = FastLanguageModel.get_peft_model(
+        model,
+        r = 16, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
+        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj",],
+        lora_alpha = 16,
+        lora_dropout = 0, # Supports any, but = 0 is optimized
+        bias = "none",    # Supports any, but = "none" is optimized
+        # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
+        # use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
+        random_state = 3407,
+        use_rslora = False,  # We support rank stabilized LoRA
+        loftq_config = None, # And LoftQ
+    )
+
+    # model, tokenizer = get_mamba_model()
+    # model, tokenizer = get_auto_model(checkpoint)
+    # model = AutoModelForCausalLM.from_pretrained(
+    #     "Qwen/Qwen2.5-0.5B-Instruct",
+    #     load_in_8bit=True,  # or load_in_4bit=True
+    #     device_map={"": 0})
+
+    # tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+
+    # lora_config = LoraConfig(
+    #     r=8,
+    #     lora_alpha=32,
+    #     lora_dropout=0.05,
+    #     bias="none",
+    #     task_type=TaskType.CAUSAL_LM,
+    #     target_modules = [
+    #         "q_proj", "k_proj", "v_proj", "o_proj",
+    #         "gate_proj", "up_proj", "down_proj",
+    #     ]
+    # )
+
+    # model = get_peft_model(model, lora_config)
+    # model.print_trainable_parameters()
 
     # Apply tokenization to the dataset
     train_ds = train_ds.map(lambda x: tokenize_with_hard_negatives(tokenizer, x, append_eos=True), batched=True)
     test_ds = test_ds.map(lambda x: tokenize_function(tokenizer, x, append_eos=True), batched=True)
+
+    # check if first token is CLS
+    print(tokenizer.eos_token_id)
+    print(tokenizer.eos_token)
+    # check if first query instance in train_ds has CLS token
+    print(train_ds[0]["query_input_ids"][-1])
 
     # docs_train = ds["train"]["docid_text"]
     # queries_train = ds["train"]["query"]
