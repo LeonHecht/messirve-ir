@@ -5,31 +5,48 @@ import torch.nn.functional as F
 
 def get_eos_embeddings(model, input_ids, attention_mask, tokenizer):
     """
-    Extract L2-normalized embeddings of the last token (EOS) for each sequence in the batch.
-
-    Checks that each sequence *ends* with tokenizer.eos_token_id.
+    Extract L2-normalized embeddings of exactly one EOS token per sequence.
+    Assumes:
+      - Each sequence in `input_ids` has exactly one EOS token.
+      - That EOS token is `tokenizer.eos_token_id`.
+    Raises an error if any sequence has zero or multiple EOS tokens.
     """
     outputs = model(
         input_ids=input_ids,
         attention_mask=attention_mask,
         output_hidden_states=True,
     )
-    # Shape: (batch_size, seq_length, hidden_dim)
-    hidden_states = outputs.hidden_states[-1]
+    hidden_states = outputs.hidden_states[-1]  # (batch_size, seq_len, hidden_dim)
 
-    # Check that the last token of each sequence is the EOS token
-    # input_ids[:, -1] has shape (batch_size,)
-    last_token_ids = input_ids[:, -1]
+    batch_size = input_ids.size(0)      # for hard negs it is batch_size*n_neg
     eos_id = tokenizer.eos_token_id
-    if not torch.all(last_token_ids.eq(eos_id)):
-        raise ValueError("At least one sequence in the batch does NOT end with the EOS token.")
 
-    # Gather embeddings for the last token in each sequence
-    # Shape: (batch_size, hidden_dim)
-    eos_embeds = hidden_states[:, -1, :]
+    # 1) Find positions of all eos_id tokens in the batch
+    # eos_positions is (row_indices, col_indices), each shape (#eos_tokens_found,)
+    eos_positions = (input_ids == eos_id).nonzero(as_tuple=True)
+    row_indices, col_indices = eos_positions
 
-    # Normalize embeddings to unit L2 norm
+    # 2) Assert that the number of EOS tokens found == batch_size
+    if row_indices.size(0) != batch_size:
+        raise ValueError(
+            f"Expected exactly 1 EOS token per sequence, "
+            f"but found {row_indices.size(0)} matches for {batch_size} sequences."
+        )
+
+    # 3) Check that each sequence index appears exactly once
+    #    i.e., no sequence is missing an EOS or has multiple
+    unique_rows, counts = row_indices.unique(return_counts=True)
+    if unique_rows.size(0) < batch_size:
+        raise ValueError("At least one sequence does not contain any EOS token.")
+    if (counts > 1).any():
+        raise ValueError("At least one sequence has multiple EOS tokens.")
+
+    # 4) Gather the embeddings for the single EOS token per sequence
+    eos_embeds = hidden_states[row_indices, col_indices, :]  # shape (batch_size, hidden_dim)
+
+    # 5) Normalize embeddings to unit L2 norm
     eos_embeds = F.normalize(eos_embeds, p=2, dim=-1)
+
     return eos_embeds
 
 
@@ -146,6 +163,8 @@ class InfoNCERetrievalTrainerHNLLM(Trainer):
         Returns:
             Loss or (Loss, Outputs)
         """
+        num_negatives = inputs["neg_input_ids"].size(1)
+
         # Extract query and document inputs
         query_inputs = {
             "input_ids": inputs["query_input_ids"],
@@ -155,22 +174,24 @@ class InfoNCERetrievalTrainerHNLLM(Trainer):
             "input_ids": inputs["doc_input_ids"],
             "attention_mask": inputs["doc_attention_mask"],
         }
-        hard_negative_inputs = {
-            "input_ids": inputs["neg_input_ids"],
-            "attention_mask": inputs["neg_attention_mask"],
-        }
 
         query_embeds = get_eos_embeddings(model, query_inputs["input_ids"], query_inputs["attention_mask"], self.tokenizer)
         positive_embeds = get_eos_embeddings(model, positive_inputs["input_ids"], positive_inputs["attention_mask"], self.tokenizer)
-        hard_neg_embeds = get_eos_embeddings(model,
-                                             hard_negative_inputs["input_ids"].view(-1, hard_negative_inputs["input_ids"].size(-1)),
-                                             hard_negative_inputs["attention_mask"].view(-1, hard_negative_inputs["attention_mask"].size(-1)),
+
+        neg_ids = inputs["neg_input_ids"]        # (batch_size, 5, doc_seq_len)
+        neg_att = inputs["neg_attention_mask"]   # (batch_size, 5, doc_seq_len)
+
+        # Flatten for the forward pass
+        neg_ids = neg_ids.view(-1, neg_ids.size(-1))           # (batch_size * 5, doc_seq_len)
+        neg_att = neg_att.view(-1, neg_att.size(-1))           # (batch_size * 5, doc_seq_len)
+        hard_neg_embeds = get_eos_embeddings(model,     # shape: (batch_size*5, emdeb_dim)
+                                             neg_ids,
+                                             neg_att,
                                              self.tokenizer)
         
         # Reshape to (batch_size, num_negatives, embed_dim)
         batch_size = query_embeds.size(0)
         embed_dim = query_embeds.size(-1)
-        num_negatives = hard_negative_inputs["input_ids"].size(1)
         hard_neg_embeds = hard_neg_embeds.view(batch_size, num_negatives, embed_dim)
 
         # Concatenate positive embeddings and hard negatives for similarity computation
@@ -201,6 +222,8 @@ class InfoNCERetrievalTrainerHNLLM(Trainer):
         """
         Custom prediction step for evaluation with hard negatives.
         """
+        num_negatives = inputs["neg_input_ids"].size(1)
+
         query_inputs = {
             "input_ids": inputs["query_input_ids"],
             "attention_mask": inputs["query_attention_mask"],
@@ -209,24 +232,25 @@ class InfoNCERetrievalTrainerHNLLM(Trainer):
             "input_ids": inputs["doc_input_ids"],
             "attention_mask": inputs["doc_attention_mask"],
         }
-        hard_negative_inputs = {
-            "input_ids": inputs["neg_input_ids"],
-            "attention_mask": inputs["neg_attention_mask"],
-        }
 
         with torch.no_grad():
             # Compute embeddings for queries
             query_embeds = get_eos_embeddings(model, query_inputs["input_ids"], query_inputs["attention_mask"], self.tokenizer)
             positive_embeds = get_eos_embeddings(model, positive_inputs["input_ids"], positive_inputs["attention_mask"], self.tokenizer)
-            hard_neg_embeds = get_eos_embeddings(model,
-                                                hard_negative_inputs["input_ids"].view(-1, hard_negative_inputs["input_ids"].size(-1)),
-                                                hard_negative_inputs["attention_mask"].view(-1, hard_negative_inputs["attention_mask"].size(-1)),
+            neg_ids = inputs["neg_input_ids"]        # (batch_size, 5, doc_seq_len)
+            neg_att = inputs["neg_attention_mask"]   # (batch_size, 5, doc_seq_len)
+
+            # Flatten for the forward pass
+            neg_ids = neg_ids.view(-1, neg_ids.size(-1))           # (batch_size * 5, doc_seq_len)
+            neg_att = neg_att.view(-1, neg_att.size(-1))           # (batch_size * 5, doc_seq_len)
+            hard_neg_embeds = get_eos_embeddings(model,     # shape: (batch_size*5, emdeb_dim)
+                                                neg_ids,
+                                                neg_att,
                                                 self.tokenizer)
 
             # Reshape to (batch_size, num_negatives, embed_dim)
             batch_size = query_embeds.size(0)
             embed_dim = query_embeds.size(-1)
-            num_negatives = hard_negative_inputs["input_ids"].size(1)
             hard_neg_embeds = hard_neg_embeds.view(batch_size, num_negatives, embed_dim)
 
             # Concatenate positive embeddings and hard negatives

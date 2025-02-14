@@ -11,6 +11,9 @@ from torch.nn.utils.rnn import pad_sequence
 import pickle
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+import sys
+print("Executable", sys.executable)
+
 import os
 # make only GPU0 visible
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -18,38 +21,63 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 STORAGE_DIR = os.getenv("STORAGE_DIR", "/media/discoexterno/leon")
 
 MAX_QUERY_LEN = 128
-MAX_DOC_LEN = 1024
+MAX_DOC_LEN = 256
+
+
+def tokenize_with_manual_eos(tokenizer, text_list, max_length):
+    """
+    Tokenize each item in text_list to max_length - 1, 
+    then manually append EOS, then (optional) pad up to max_length.
+    """
+    # 1) Tokenize with max_length - 1, no padding.
+    #    We rely on a custom approach to handle final EOS and padding.
+    partial_encoded = tokenizer(
+        text_list,
+        truncation=True,
+        max_length=max_length - 1,
+        padding=False,
+    )
+
+    # 2) Manually append EOS for each sequence
+    eos_id = tokenizer.eos_token_id
+    new_input_ids = []
+    new_attention_masks = []
+
+    for inp_ids, att_mask in zip(partial_encoded["input_ids"], partial_encoded["attention_mask"]):
+        # Append EOS token
+        inp_ids.append(eos_id)
+        att_mask.append(1)
+
+        # 3) (Optional) Now pad if we want a fixed size == max_length
+        #    If you truly want each sequence to be exactly max_length:
+        pad_len = max_length - len(inp_ids)
+        if pad_len > 0:
+            inp_ids.extend([tokenizer.pad_token_id] * pad_len)
+            att_mask.extend([0] * pad_len)
+
+        new_input_ids.append(inp_ids)
+        new_attention_masks.append(att_mask)
+
+    return {
+        "input_ids": new_input_ids,
+        "attention_mask": new_attention_masks,
+    }
 
 
 def tokenize_with_hard_negatives(tokenizer, examples, append_eos=False):
-    # Append the EOS token to queries and documents
-    if append_eos:
-        examples["query"] = [q + tokenizer.eos_token for q in examples["query"]]
-        examples["docid_text"] = [d + tokenizer.eos_token for d in examples["docid_text"]]
-        examples["hard_negatives"] = [
-            [neg + tokenizer.eos_token for neg in neg_list]
-            for neg_list in examples["hard_negatives"]
-        ]
-
     # Flatten the list of hard negatives for tokenization
     flattened_negatives = []
     for hard_neg_docs in examples["hard_negatives"]:
         flattened_negatives.extend(hard_neg_docs)
     
     # Tokenize queries
-    tokenized_queries = tokenizer(
-        examples["query"], truncation=True, padding=True, max_length=MAX_QUERY_LEN
-    )
+    tokenized_queries = tokenize_with_manual_eos(tokenizer, examples["query"], max_length=MAX_QUERY_LEN)
     
     # Tokenize positive documents
-    tokenized_docs = tokenizer(
-        examples["docid_text"], truncation=True, padding=True, max_length=MAX_DOC_LEN
-    )
+    tokenized_docs = tokenize_with_manual_eos(tokenizer, examples["docid_text"], max_length=MAX_DOC_LEN)
     
     # Tokenize hard negatives (flattened)
-    tokenized_all_negatives = tokenizer(
-        flattened_negatives, truncation=True, padding=True, max_length=MAX_DOC_LEN
-    )
+    tokenized_all_negatives = tokenize_with_manual_eos(tokenizer, flattened_negatives, max_length=MAX_DOC_LEN)
     
     # Rolling index to rebuild the structure
     rolling_index = 0
@@ -81,8 +109,8 @@ def tokenize_function(tokenizer, examples, append_eos=False):
         examples["query"] = [q + tokenizer.eos_token for q in examples["query"]]
         examples["docid_text"] = [d + tokenizer.eos_token for d in examples["docid_text"]]
 
-    tokenized_queries = tokenizer(examples["query"], truncation=True, padding=True, max_length=128)
-    tokenized_docs = tokenizer(examples["docid_text"], truncation=True, padding=True, max_length=512)
+    tokenized_queries = tokenizer(examples["query"], truncation=True, padding=True, max_length=MAX_QUERY_LEN)
+    tokenized_docs = tokenizer(examples["docid_text"], truncation=True, padding=True, max_length=MAX_DOC_LEN)
 
     # Return tokenized queries and documents
     return {
@@ -94,42 +122,56 @@ def tokenize_function(tokenizer, examples, append_eos=False):
 
 
 def custom_data_collator(batch):
-    # Pad query input IDs and attention masks
-    query_input_ids = [torch.tensor(example["query_input_ids"]) for example in batch]
-    query_attention_mask = [torch.tensor(example["query_attention_mask"]) for example in batch]
+    """
+    Since tokenize_with_manual_eos() already pads each sequence to a uniform max_length,
+    here we just stack them into tensors. We assume:
+      - Each example in 'batch' has identical shapes for query, doc, etc.
+      - The number of negatives (e.g. n_neg=5) is the same for all examples.
+    """
+    import torch
 
-    # Pad positive document input IDs and attention masks
-    doc_input_ids = [torch.tensor(example["doc_input_ids"]) for example in batch]
-    doc_attention_mask = [torch.tensor(example["doc_attention_mask"]) for example in batch]
+    # -- Queries --
+    query_input_ids = torch.stack(
+        [torch.tensor(example["query_input_ids"], dtype=torch.long) for example in batch],
+        dim=0
+    )  # shape: (batch_size, query_seq_len)
+    query_attention_mask = torch.stack(
+        [torch.tensor(example["query_attention_mask"], dtype=torch.long) for example in batch],
+        dim=0
+    )  # shape: (batch_size, query_seq_len)
 
-    # Pad hard negatives input IDs and attention masks (if present)
-    if "neg_input_ids" in batch[0] and "neg_attention_mask" in batch[0]:
-        neg_input_ids = [
-            torch.tensor(hard_negative) for example in batch for hard_negative in example["neg_input_ids"]
-        ]
-        neg_attention_mask = [
-            torch.tensor(hard_negative_mask) for example in batch for hard_negative_mask in example["neg_attention_mask"]
-        ]
-        
-        neg_input_ids_padded = pad_sequence(neg_input_ids, batch_first=True, padding_value=0)
-        neg_attention_mask_padded = pad_sequence(neg_attention_mask, batch_first=True, padding_value=0)
-    else:
-        neg_input_ids_padded = None
-        neg_attention_mask_padded = None
+    # -- Positive Docs --
+    doc_input_ids = torch.stack(
+        [torch.tensor(example["doc_input_ids"], dtype=torch.long) for example in batch],
+        dim=0
+    )  # shape: (batch_size, doc_seq_len)
+    doc_attention_mask = torch.stack(
+        [torch.tensor(example["doc_attention_mask"], dtype=torch.long) for example in batch],
+        dim=0
+    )  # shape: (batch_size, doc_seq_len)
 
-    # Return padded inputs
-    result = {
-        "query_input_ids": pad_sequence(query_input_ids, batch_first=True, padding_value=0),
-        "query_attention_mask": pad_sequence(query_attention_mask, batch_first=True, padding_value=0),
-        "doc_input_ids": pad_sequence(doc_input_ids, batch_first=True, padding_value=0),
-        "doc_attention_mask": pad_sequence(doc_attention_mask, batch_first=True, padding_value=0),
+    # -- Hard Negatives --
+    # Each example["neg_input_ids"] is a list of length n_neg,
+    # where each item is a list of length doc_seq_len (already padded).
+    # So example["neg_input_ids"] => shape (n_neg, doc_seq_len)
+    neg_input_ids = torch.stack(
+        [torch.tensor(example["neg_input_ids"], dtype=torch.long) for example in batch],
+        dim=0
+    )  # shape: (batch_size, n_neg, doc_seq_len)
+
+    neg_attention_mask = torch.stack(
+        [torch.tensor(example["neg_attention_mask"], dtype=torch.long) for example in batch],
+        dim=0
+    )  # shape: (batch_size, n_neg, doc_seq_len)
+
+    return {
+        "query_input_ids": query_input_ids,
+        "query_attention_mask": query_attention_mask,
+        "doc_input_ids": doc_input_ids,
+        "doc_attention_mask": doc_attention_mask,
+        "neg_input_ids": neg_input_ids,
+        "neg_attention_mask": neg_attention_mask,
     }
-
-    if neg_input_ids_padded is not None and neg_attention_mask_padded is not None:
-        result["neg_input_ids"] = neg_input_ids_padded
-        result["neg_attention_mask"] = neg_attention_mask_padded
-
-    return result
 
 
 def train():
@@ -152,13 +194,13 @@ def train():
 
     # Apply tokenization to the dataset
     train_ds = train_ds.map(lambda x: tokenize_with_hard_negatives(tokenizer, x, append_eos=True), batched=True)
-    test_ds = test_ds.map(lambda x: tokenize_function(tokenizer, x, append_eos=False), batched=True)
+    test_ds = test_ds.map(lambda x: tokenize_function(tokenizer, x, append_eos=True), batched=True)
 
     # check if first token is CLS
-    print(tokenizer.cls_token_id)
-    print(tokenizer.cls_token)
+    print(tokenizer.eos_token_id)
+    print(tokenizer.eos_token)
     # check if first query instance in train_ds has CLS token
-    print(train_ds[0]["query_input_ids"][0])
+    print(train_ds[0]["query_input_ids"][-1])
 
     # docs_train = ds["train"]["docid_text"]
     # queries_train = ds["train"]["query"]
