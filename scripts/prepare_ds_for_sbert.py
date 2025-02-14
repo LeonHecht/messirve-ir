@@ -1,4 +1,19 @@
+"""
+This script adapts the messirve_{split}_{country}_hard_negatives dataset
+for training a Sentence Transformer model.
+Output: messirve_{split}_{country}_hard_negatives1_sbert
+Required input: messirve_{split}_{country}_hard_negatives
+
+This is Script 3) of the pipeline
+1) mine_hard_negatives.py
+2) preprocess_dataset.py
+3) prepare_ds_for_sbert.py (if later training with Sentence Transformers)
+"""
 from datasets import load_from_disk, load_dataset
+import os
+
+STORAGE_DIR = os.getenv("STORAGE_DIR", "/media/discoexterno/leon/messirve-ir/data")
+# STORAGE_DIR = os.getenv("STORAGE_DIR", "/tmpu/helga_g/leonh_a/messirve-ir/data")
 
 
 # Expand the 'hard_negatives' column
@@ -18,7 +33,7 @@ def prepare(split):
     assert split in ["train", "test"], "Split should be either 'train' or 'test'"
     
     country = "ar"
-    ds = load_from_disk(f"messirve_{split}_{country}_hard_negatives")
+    ds = load_from_disk(os.path.join(STORAGE_DIR, f"messirve_{split}_{country}_hard_negatives"))
 
     # Remove unwanted columns
     ds = ds.map(lambda x: x, remove_columns=['id',
@@ -41,10 +56,10 @@ def prepare(split):
     # Rename docid_text column to 'positive'
     ds = ds.rename_column("docid_text", "positive")
 
-    df = ds.to_pandas()
+    # df = ds.to_pandas()   # for visualizing
 
     # Save the dataset
-    ds.save_to_disk(f"messirve_{split}_{country}_hard_negatives1_sbert")
+    ds.save_to_disk(os.path.join(STORAGE_DIR, f"messirve_{split}_{country}_hard_negatives1_sbert"))
 
 
 if __name__ == "__main__":

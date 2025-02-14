@@ -1,5 +1,19 @@
-from datasets import load_from_disk
+"""
+This script preprocesses the dataset by adding hard negatives to the overall dataset.
+Output: messirve_{split}_{country}_hard_negatives
+Required input: hard_negatives_{split}_{model}_{country}.pkl
+
+This is Script 2) of the pipeline
+1) mine_hard_negatives.py
+2) preprocess_dataset.py
+3) prepare_ds_for_sbert.py (if later training with Sentence Transformers)
+"""
+from datasets import load_dataset
 import pickle
+import os
+
+STORAGE_DIR = os.getenv("STORAGE_DIR", "/media/discoexterno/leon/messirve-ir/data")
+# STORAGE_DIR = os.getenv("STORAGE_DIR", "/tmpu/helga_g/leonh_a/messirve-ir/data")
 
 
 def add_hard_negatives(example, docid_to_text, hard_negatives):
@@ -42,13 +56,13 @@ def main(split):
     
     country = "ar"
     print(f"Training on {country} dataset...")
-    ds = load_from_disk(f"messirve_{country}")
+    ds = load_dataset("spanish-ir/messirve", country)
     ds = ds[split]
     print("Dataset loaded")
 
     # read hard negatives from disk
     print("Loading hard negatives from pickle file...", end="")
-    with open(f"hard_negatives_{split}_bge_{country}.pkl", "rb") as f:
+    with open(os.path.join(STORAGE_DIR, f"hard_negatives_{split}_bge_{country}.pkl"), "rb") as f:
         hard_negatives = pickle.load(f)
         print("Done")
 
@@ -56,7 +70,7 @@ def main(split):
     ds = ds.map(limit_hard_negatives)
 
     # save ds to disk
-    ds.save_to_disk(f"messirve_{split}_{country}_hard_negatives")
+    ds.save_to_disk(os.path.join(STORAGE_DIR, f"messirve_{split}_{country}_hard_negatives"))
 
 
 if __name__ == "__main__":

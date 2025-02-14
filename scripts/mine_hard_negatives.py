@@ -1,3 +1,13 @@
+"""
+This script mines hard negatives with the bge-m3 model.
+Output: hard_negatives_{split}_{model}_{country}.pkl
+Required input: None
+
+This is Script 1) of the pipeline
+1) mine_hard_negatives.py
+2) preprocess_dataset.py
+3) prepare_ds_for_sbert.py (if later training with Sentence Transformers)
+"""
 from utils.retrieval_utils import embed_bge
 from datasets import load_dataset
 import torch
@@ -7,6 +17,9 @@ import pickle
 import sys
 print("Executable:", sys.executable)
 from tqdm import tqdm
+
+STORAGE_DIR = os.getenv("STORAGE_DIR", "/media/discoexterno/leon/messirve-ir/data")
+# STORAGE_DIR = os.getenv("STORAGE_DIR", "/tmpu/helga_g/leonh_a/messirve-ir/data")
 
 
 def mine_hard_negatives(model, country, k, split):
@@ -21,7 +34,7 @@ def mine_hard_negatives(model, country, k, split):
     device = torch.device("cuda")
 
     if model == "bge":
-        run_path = f"run_bge_{split}_{country}.pkl"
+        run_path = os.path.join(STORAGE_DIR, "run_bge_{split}_{country}.pkl")
         if not os.path.exists(run_path):
             checkpoint = 'BAAI/bge-m3'
             # checkpoint = 'BAAI/bge-m3-unsupervised'
@@ -65,7 +78,7 @@ if __name__ == "__main__":
     k = 15
     split = "test"
     hard_negatives = mine_hard_negatives(model, country, k, split)
-    with open(f"hard_negatives_{split}_{model}_{country}.pkl", "wb") as f:
+    with open(os.path.join(STORAGE_DIR, f"hard_negatives_{split}_{model}_{country}.pkl"), "wb") as f:
         print("Dumping hard negatives to pickle file...", end="")
         pickle.dump(hard_negatives, f)
         print("Done")

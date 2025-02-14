@@ -19,12 +19,12 @@ print("Executable", sys.executable)
 
 import os
 # make only GPU0 visible
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 STORAGE_DIR = os.getenv("STORAGE_DIR", "/media/discoexterno/leon")
 # STORAGE_DIR = os.getenv("STORAGE_DIR", "/tmpu/helga_g/leonh_a/qwen-2-vec")
 
-MAX_QUERY_LEN = 64
+MAX_QUERY_LEN = 128
 MAX_DOC_LEN = 512
 
 
@@ -184,9 +184,10 @@ def train():
 
     # load train_df from disk
     train_ds = load_from_disk(f"messirve_train_{country}_hard_negatives")
-
     train_ds = train_ds.select(range(5000))
+
     test_ds = load_from_disk(f"messirve_test_{country}_hard_negatives")
+    test_ds = test_ds.select(range(1000))
 
     checkpoint = STORAGE_DIR + "/qwen-2-vec/run_89622_texts_1_epoch/output-model/checkpoint-2500"
 
@@ -212,16 +213,18 @@ def train():
             # "unsloth/Qwen2.5-0.5B", "unsloth/Qwen2.5-1.5B", "unsloth/Qwen2.5-3B"
             # "unsloth/Qwen2.5-14B",  "unsloth/Qwen2.5-32B",  "unsloth/Qwen2.5-72B",
             # And also all Instruct versions and Math. Coding verisons!
-            model_name = "unsloth/Qwen2.5-7B",
+            model_name = "unsloth/Qwen2.5-0.5B",
             max_seq_length = MAX_DOC_LEN,
-            dtype = None,
+            # set dtype to bf16
+            dtype = "bf16",
             load_in_4bit = False,
+            # device_map="cuda:1",
             # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
         )
 
         model = FastLanguageModel.get_peft_model(
             model,
-            r = 16, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
+            r = 32, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
             target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
                             "gate_proj", "up_proj", "down_proj",],
             lora_alpha = 16,
@@ -236,7 +239,7 @@ def train():
 
     # Apply tokenization to the dataset
     train_ds = train_ds.map(lambda x: tokenize_with_hard_negatives(tokenizer, x, append_eos=True), batched=True)
-    test_ds = test_ds.map(lambda x: tokenize_function(tokenizer, x, append_eos=True), batched=True)
+    test_ds = test_ds.map(lambda x: tokenize_with_hard_negatives(tokenizer, x, append_eos=True), batched=True)
 
     # docs_train = ds["train"]["docid_text"]
     # queries_train = ds["train"]["query"]
@@ -257,21 +260,23 @@ def train():
     training_args = TrainingArguments(
         output_dir=output_dir,           # Directory to save checkpoints
         evaluation_strategy="steps",     # Evaluate at the end of each epoch
-        eval_steps=500,                  # Evaluate every 500 steps
-        learning_rate=5e-6,              # Learning rate
-        per_device_train_batch_size=2,  # Batch size for training
-        per_device_eval_batch_size=2,   # Batch size for evaluation
-        gradient_accumulation_steps=8,
-        num_train_epochs=2,              # Number of epochs
+        eval_steps=200,                  # Evaluate every 500 steps
+        learning_rate=1e-5,              # Learning rate
+        per_device_train_batch_size=8,  # Batch size for training
+        per_device_eval_batch_size=8,   # Batch size for evaluation
+        gradient_accumulation_steps=4,
+        num_train_epochs=1,              # Number of epochs
         weight_decay=0.01,               # Weight decay
         max_grad_norm=30,                # Maximum gradient norm
         save_strategy="steps",           # Save model checkpoints at the end of each epoch
-        save_steps=500,                  # Save checkpoints every 500 stepss
+        save_steps=200,                  # Save checkpoints every 500 stepss
         logging_dir="./logs",            # Directory for logs
         logging_steps=10,                # Log every 10 steps
         save_total_limit=1,              # Save only the last checkpoint
         remove_unused_columns=False,
         warmup_ratio=0.1,
+        fp16=False,
+        bf16=True,
         # gradient_checkpointing=True,
     )
 
