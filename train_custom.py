@@ -184,10 +184,10 @@ def train():
 
     # load train_df from disk
     train_ds = load_from_disk(f"messirve_train_{country}_hard_negatives")
-    train_ds = train_ds.select(range(5000))
+    # train_ds = train_ds.select(range(5000))
 
     test_ds = load_from_disk(f"messirve_test_{country}_hard_negatives")
-    test_ds = test_ds.select(range(1000))
+    # test_ds = test_ds.select(range(1000))
 
     checkpoint = STORAGE_DIR + "/qwen-2-vec/run_89622_texts_1_epoch/output-model/checkpoint-2500"
 
@@ -256,16 +256,24 @@ def train():
 
     output_dir = os.path.join(STORAGE_DIR, "qwen-2-vec", "results_IR")
 
+    batch_size = 8
+    gradient_accumulation_steps = 4
+    epochs = 1
+
+    # Compute total steps given your dataset and hyperparameters
+    total_steps = (len(train_ds) // (batch_size * gradient_accumulation_steps)) * epochs
+    eval_steps = total_steps // 4
+
     # Define TrainingArguments
     training_args = TrainingArguments(
         output_dir=output_dir,           # Directory to save checkpoints
         evaluation_strategy="steps",     # Evaluate at the end of each epoch
-        eval_steps=200,                  # Evaluate every 500 steps
-        learning_rate=1e-5,              # Learning rate
-        per_device_train_batch_size=8,  # Batch size for training
-        per_device_eval_batch_size=8,   # Batch size for evaluation
-        gradient_accumulation_steps=4,
-        num_train_epochs=1,              # Number of epochs
+        eval_steps=eval_steps,                  # Evaluate every 500 steps
+        learning_rate=2e-4,              # Learning rate
+        per_device_train_batch_size=batch_size,  # Batch size for training
+        per_device_eval_batch_size=batch_size,   # Batch size for evaluation
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        num_train_epochs=epochs,              # Number of epochs
         weight_decay=0.01,               # Weight decay
         max_grad_norm=30,                # Maximum gradient norm
         save_strategy="steps",           # Save model checkpoints at the end of each epoch
