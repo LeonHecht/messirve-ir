@@ -126,14 +126,14 @@ def run(model, metrics, country, model_instance=None, tokenizer=None, reranker_m
         from transformers import AutoModelForCausalLM
         run_path = f"run_qwen_{country}.pkl"
         if not os.path.exists(run_path) or not reuse_run:
-            checkpoint = '/media/discoexterno/leon/qwen-2-vec/run_2000_texts/output-model/checkpoint-560'
-            tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-0.5B-Instruct')
-            tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-            model = AutoModelForCausalLM.from_pretrained(checkpoint)
-            model.resize_token_embeddings(len(tokenizer))
-            device = "cuda:0" if torch.cuda.is_available() else "cpu"
-            model.to(device)
-            run = embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids)
+            # checkpoint = '/media/discoexterno/leon/qwen-2-vec/run_2000_texts/output-model/checkpoint-560'
+            # tokenizer = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-0.5B-Instruct')
+            # tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+            # model = AutoModelForCausalLM.from_pretrained(checkpoint)
+            # model.resize_token_embeddings(len(tokenizer))
+            # device = "cuda:0"
+            model_instance.to(device)
+            run = embed_qwen(model_instance, tokenizer, docs, queries, doc_ids, query_ids)
     else:
         raise ValueError("Model not supported.")
     
@@ -177,15 +177,24 @@ def run(model, metrics, country, model_instance=None, tokenizer=None, reranker_m
     return avg_metrics
 
 
+def main():
+    from unsloth import FastLanguageModel
+    # from transformers import AutoModelForCausalLM
+    model, tokenizer = FastLanguageModel.from_pretrained("/media/discoexterno/leon/qwen-2-vec/results_IR/checkpoint-705")
+    # tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", model_instance=model, tokenizer=tokenizer, reuse_run=False)
+
+
 if __name__ == "__main__":
     # reranker_model = AutoModelForSequenceClassification.from_pretrained("results_cross_encoder_91_f1/checkpoint-11500")
     # model = SentenceTransformer("multirun/2025-01-30/11-45-41/1/finetuned_models/distiluse-base-multilingual-cased-v1-exp_20250130_123521")
-    model = SentenceTransformer("sentence-transformers/distiluse-base-multilingual-cased-v2")
+    # model = SentenceTransformer("sentence-transformers/distiluse-base-multilingual-cased-v2")
     # tokenizer = AutoTokenizer.from_pretrained("FacebookAI/xlm-roberta-base")
-    run(model="sentence-transformer", model_instance=model, metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False, rerank=False)
+    # run(model="sentence-transformer", model_instance=model, metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False, rerank=False)
     # run(model="qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False)
     # run(model="bge-finetuned", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar")
     # run(model="jinja", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
     # run(model="mamba", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
     # run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", model_instance=model, reuse_run=False)
     # run("bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False)
+    main()

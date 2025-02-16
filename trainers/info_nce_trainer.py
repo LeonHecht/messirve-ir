@@ -164,7 +164,8 @@ class InfoNCERetrievalTrainerHNLLM(Trainer):
         Returns:
             Loss or (Loss, Outputs)
         """
-        num_negatives = inputs["neg_input_ids"].size(1)
+        num_negatives = inputs["neg_input_ids"].size(1) # shape: (batch_size, n_neg, doc_seq_len)
+        assert num_negatives == 5, "Number of hard negatives should be 5."
 
         # Extract query and document inputs
         query_inputs = {
@@ -178,33 +179,40 @@ class InfoNCERetrievalTrainerHNLLM(Trainer):
 
         query_embeds = get_eos_embeddings(model, query_inputs["input_ids"], query_inputs["attention_mask"], self.tokenizer)
         positive_embeds = get_eos_embeddings(model, positive_inputs["input_ids"], positive_inputs["attention_mask"], self.tokenizer)
+        assert query_embeds.shape == positive_embeds.shape
 
-        neg_ids = inputs["neg_input_ids"]        # (batch_size, 5, doc_seq_len)
-        neg_att = inputs["neg_attention_mask"]   # (batch_size, 5, doc_seq_len)
+
+        neg_ids = inputs["neg_input_ids"]        # (batch_size, n_neg, doc_seq_len)
+        neg_att = inputs["neg_attention_mask"]   # (batch_size, n_neg, doc_seq_len)
 
         # Flatten for the forward pass
-        neg_ids = neg_ids.view(-1, neg_ids.size(-1))           # (batch_size * 5, doc_seq_len)
-        neg_att = neg_att.view(-1, neg_att.size(-1))           # (batch_size * 5, doc_seq_len)
-        hard_neg_embeds = get_eos_embeddings(model,     # shape: (batch_size*5, emdeb_dim)
+        neg_ids = neg_ids.view(-1, neg_ids.size(-1))           # (batch_size * n_neg, doc_seq_len)
+        neg_att = neg_att.view(-1, neg_att.size(-1))           # (batch_size * n_neg, doc_seq_len)
+        hard_neg_embeds = get_eos_embeddings(model,     # shape: (batch_size*n_neg, emdeb_dim)
                                              neg_ids,
                                              neg_att,
                                              self.tokenizer)
+        assert hard_neg_embeds.shape == (query_embeds.size(0) * num_negatives, query_embeds.size(-1))
         
         # Reshape to (batch_size, num_negatives, embed_dim)
         batch_size = query_embeds.size(0)
         embed_dim = query_embeds.size(-1)
         hard_neg_embeds = hard_neg_embeds.view(batch_size, num_negatives, embed_dim)
 
+        assert hard_neg_embeds.shape == (batch_size, num_negatives, embed_dim)
+
         # Concatenate positive embeddings and hard negatives for similarity computation
         all_docs_embeds = torch.cat(
             [positive_embeds.unsqueeze(1), hard_neg_embeds],
             dim=1
         )  # (batch_size, 1 + num_hard_negatives, embedding_dim)
+        assert all_docs_embeds.shape == (batch_size, 1 + num_negatives, embed_dim)
 
         # Compute similarity scores
         similarity_matrix = torch.matmul(
             query_embeds.unsqueeze(1), all_docs_embeds.transpose(1, 2)
         ).squeeze(1)  # (batch_size, 1 + num_hard_negatives)
+        assert similarity_matrix.shape == (batch_size, 1 + num_negatives)
 
         # Compute InfoNCE loss
         labels = torch.zeros(batch_size, dtype=torch.long, device=query_embeds.device)  # Positive at index 0

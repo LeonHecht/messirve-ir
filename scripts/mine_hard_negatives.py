@@ -34,13 +34,13 @@ def mine_hard_negatives(model, country, k, split):
     device = torch.device("cuda")
 
     if model == "bge":
-        run_path = os.path.join(STORAGE_DIR, "run_bge_{split}_{country}.pkl")
+        run_path = os.path.join(STORAGE_DIR, f"run_bge_{split}_{country}.pkl")
         if not os.path.exists(run_path):
             checkpoint = 'BAAI/bge-m3'
             # checkpoint = 'BAAI/bge-m3-unsupervised'
             # checkpoint = 'BAAI/bge-m3-retromae'
             model = get_bge_m3_model(checkpoint)
-            run = embed_bge(model, docs, queries, doc_ids, query_ids)
+            run = embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run=False)
             # save run to disk using pickle
             with open(run_path, "wb") as f:
                 print("Dumping run to pickle file...", end="")
@@ -76,7 +76,7 @@ if __name__ == "__main__":
     model = "bge"
     country = "ar"
     k = 15
-    split = "test"
+    split = "train"
     hard_negatives = mine_hard_negatives(model, country, k, split)
     with open(os.path.join(STORAGE_DIR, f"hard_negatives_{split}_{model}_{country}.pkl"), "wb") as f:
         print("Dumping hard negatives to pickle file...", end="")

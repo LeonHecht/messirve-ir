@@ -2,10 +2,8 @@ import os
 import numpy as np
 from tqdm import tqdm
 import torch
-
-# Globals
-MAX_QUERY_LEN = 256
-MAX_DOC_LEN = 2048
+from .train_utils import tokenize_with_manual_eos
+from config import MAX_QUERY_LEN, MAX_DOC_LEN
 
 
 def retrieve(query_ids, doc_ids, similarity):
@@ -42,7 +40,12 @@ def compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs, 
     
     print("Computing similarity...", end="")
     if sim_type == 'dot':
-        similarity = embeddings_queries @ embeddings_docs.T
+        similarities = []
+        batch_size = 32
+        for query_batch in torch.split(embeddings_queries, batch_size, dim=0):
+            sim_batch = query_batch @ embeddings_docs.T
+            similarities.append(sim_batch)
+        similarity = torch.cat(similarities, dim=0)
     elif sim_type == 'cosine':
         # Only use angle between embeddings
         embeddings_queries = F.normalize(embeddings_queries, p=2, dim=1)
@@ -123,39 +126,6 @@ def embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run):
     return run
 
 
-from torch.nn.utils.rnn import pad_sequence
-
-def ensure_eos_and_pad(tokenized, eos_id, max_length, pad_token_id=0):
-    """
-    Ensures each sequence in `tokenized["input_ids"]` ends with EOS if there's space,
-    then re-pads the sequences to a uniform length.
-    """
-    input_ids_list = []
-    attention_mask_list = []
-
-    # Go through each example
-    for seq_ids, seq_mask in tqdm(zip(tokenized["input_ids"], tokenized["attention_mask"]), total=len(tokenized["input_ids"])):
-        seq_ids = seq_ids.tolist()
-        seq_mask = seq_mask.tolist()
-
-        # If there's space, append EOS
-        if len(seq_ids) < max_length:
-            if seq_ids[-1] != eos_id:
-                seq_ids.append(eos_id)
-                seq_mask.append(1)
-
-        # Convert back to tensors
-        input_ids_list.append(torch.tensor(seq_ids, dtype=torch.long))
-        attention_mask_list.append(torch.tensor(seq_mask, dtype=torch.long))
-
-    # Re-pad them to the same length (again)
-    padded_input_ids = pad_sequence(input_ids_list, batch_first=True, padding_value=pad_token_id)
-    padded_attention_mask = pad_sequence(attention_mask_list, batch_first=True, padding_value=0)
-
-    tokenized["input_ids"] = padded_input_ids
-    tokenized["attention_mask"] = padded_attention_mask
-
-
 def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
     """
     Embed the queries and documents using the BAAI embeddings models and compute the similarity between queries and documents.
@@ -171,39 +141,25 @@ def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
         dict: Dictionary with query as key and a list of tuples of (similarity, document text, doc_id) as value.
     """
     from torch.utils.data import DataLoader, TensorDataset
+    import torch.nn.functional as F
     batch_size = 4
     device = next(model.parameters()).device  # Automatically detect model's device
     print("Device: ", device)
 
-    doc_prompts = [f"{doc} El texto de entrada es: {tokenizer.eos_token}" for doc in docs]  # Construct the prompt
-    query_prompts = [f"{query} El texto de entrada es: {tokenizer.eos_token}" for query in queries]  # Construct the prompt
-
-    inputs_docs = tokenizer(
-        doc_prompts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=1024
-    )
-    inputs_queries = tokenizer(
-        query_prompts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=MAX_QUERY_LEN
-    )
-
-    eos_id = tokenizer.eos_token_id
-    pad_id = tokenizer.pad_token_id
-
-    ensure_eos_and_pad(inputs_docs, eos_id, MAX_DOC_LEN, pad_token_id=pad_id)
-    ensure_eos_and_pad(inputs_queries, eos_id, MAX_QUERY_LEN, pad_token_id=pad_id)
+    inputs_docs = tokenize_with_manual_eos(tokenizer, docs, MAX_DOC_LEN)
+    inputs_queries = tokenize_with_manual_eos(tokenizer, queries, max_length=MAX_QUERY_LEN)
 
     print("Docs and queries tokenized.")
 
     # Create DataLoaders for batching
-    doc_dataset = TensorDataset(inputs_docs["input_ids"], inputs_docs["attention_mask"])
-    query_dataset = TensorDataset(inputs_queries["input_ids"], inputs_queries["attention_mask"])
+    doc_input_ids = torch.tensor(inputs_docs["input_ids"], dtype=torch.long)
+    doc_attention_mask = torch.tensor(inputs_docs["attention_mask"], dtype=torch.long)
+    doc_dataset = TensorDataset(doc_input_ids, doc_attention_mask)
+    
+    query_input_ids = torch.tensor(inputs_queries["input_ids"], dtype=torch.long)
+    query_attention_mask = torch.tensor(inputs_queries["attention_mask"], dtype=torch.long)
+    query_dataset = TensorDataset(query_input_ids, query_attention_mask)
+
     doc_loader = DataLoader(doc_dataset, batch_size=batch_size, pin_memory=True)
     query_loader = DataLoader(query_dataset, batch_size=batch_size, pin_memory=True)
 
@@ -217,7 +173,7 @@ def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
             # Extract the embedding for the <|end_of_text|> token (e_t)
             eos_positions = (input_ids == tokenizer.eos_token_id).nonzero(as_tuple=True)
             # Check if eos_positions is empty
-            if eos_positions[0].numel() < input_ids.size(0):
+            if eos_positions[0].numel() != input_ids.size(0):
                 raise ValueError("Not all sequences in the batch contain the EOS token.")
             doc_embeddings = hidden_states[eos_positions]  # Shape: (batch_size, hidden_dim)
             embeddings_docs.append(doc_embeddings)
@@ -238,6 +194,9 @@ def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
             embeddings_queries.append(query_embeddings)
     embeddings_queries = torch.cat(embeddings_queries, dim=0)  # Combine batches
     print("Embeddings done.")
+
+    embeddings_docs = F.normalize(embeddings_docs, p=2, dim=-1)
+    embeddings_queries = F.normalize(embeddings_queries, p=2, dim=-1)
 
     run = compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs)
     return run
