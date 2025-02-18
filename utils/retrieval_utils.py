@@ -2,8 +2,43 @@ import os
 import numpy as np
 from tqdm import tqdm
 import torch
-from .train_utils import tokenize_with_manual_eos
+import pytrec_eval
+from .train_utils import tokenize_with_manual_eos, get_eos_embeddings
 from config import MAX_QUERY_LEN, MAX_DOC_LEN
+
+
+def batch_encode_jina(model, data, batch_size, task, max_length):
+    """
+    Encode data in batches using the provided model.
+
+    Parameters
+    ----------
+    model : object
+        The Jinja embeddings model.
+    data : list or dict
+        Data to be encoded. If a dict, the values will be used.
+    batch_size : int
+        Number of items to encode per batch.
+    task : str
+        Task identifier for the encoding (e.g., 'retrieval.query' or 'retrieval.passage').
+    max_length : int
+        Maximum token length for the encoding.
+
+    Returns
+    -------
+    list
+        A list of embeddings corresponding to the input data.
+    """
+    # If data is a dict, convert to list of values.
+    if isinstance(data, dict):
+        data = list(data.values())
+
+    embeddings = []
+    for i in tqdm(range(0, len(data), batch_size), desc="Batch encoding data"):
+        batch = data[i : i + batch_size]
+        batch_embeddings = model.encode(batch, task=task, max_length=max_length)
+        embeddings.extend(batch_embeddings)
+    return embeddings
 
 
 def retrieve(query_ids, doc_ids, similarity):
@@ -59,7 +94,7 @@ def compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs, 
     return retrieve(query_ids, doc_ids, similarity)
 
 
-def embed_jinja(model, docs, queries, doc_ids, query_ids, reuse_run):
+def embed_jinja(model, docs, queries, doc_ids, query_ids):
     """
     Embed the queries and documents using the Jinja embeddings model and compute the similarity between queries and documents.
     Calls the retrieve function.
@@ -76,16 +111,20 @@ def embed_jinja(model, docs, queries, doc_ids, query_ids, reuse_run):
     # When calling the `encode` function, you can choose a `task` based on the use case:
     # 'retrieval.query', 'retrieval.passage', 'separation', 'classification', 'text-matching'
     # Alternatively, you can choose not to pass a `task`, and no specific LoRA adapter will be used.
-    embeddings_queries = model.encode(queries, task="retrieval.query", max_length=MAX_QUERY_LEN)
-    path = 'corpus/embeddings_corpus_jinja.npy'
+    print("Encoding queries...", end="")
+    embeddings_queries = batch_encode_jina(
+        model, queries, batch_size=128, task="retrieval.query", max_length=MAX_QUERY_LEN
+    )
+    print("Done.")
 
-    if not os.path.exists(path) or not reuse_run:
-        embeddings_docs = model.encode(docs, task="retrieval.passage", max_length=MAX_DOC_LEN)
-        # save embeddings
-        np.save(path, embeddings_docs)
-    else:
-        # Load embeddings
-        embeddings_docs = np.load(path)
+    print("Encoding docs...", end="")
+    embeddings_docs = batch_encode_jina(
+        model, docs, batch_size=256, task="retrieval.passage", max_length=MAX_DOC_LEN
+    )
+    print("Done.")
+
+    embeddings_queries = torch.tensor(embeddings_queries, dtype=torch.float32)
+    embeddings_docs = torch.tensor(embeddings_docs, dtype=torch.float32)
 
     # Compute similarities
     run = compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs)
@@ -142,7 +181,7 @@ def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
     """
     from torch.utils.data import DataLoader, TensorDataset
     import torch.nn.functional as F
-    batch_size = 4
+    batch_size = 32
     device = next(model.parameters()).device  # Automatically detect model's device
     print("Device: ", device)
 
@@ -163,40 +202,23 @@ def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
     doc_loader = DataLoader(doc_dataset, batch_size=batch_size, pin_memory=True)
     query_loader = DataLoader(query_dataset, batch_size=batch_size, pin_memory=True)
 
-    print("Embedding docs and queries...")
-    embeddings_docs = []
-    with torch.no_grad():
-        for input_ids, attention_mask in tqdm(doc_loader):
-            batch = {"input_ids": input_ids.to(device), "attention_mask": attention_mask.to(device)}
-            output = model(**batch, output_hidden_states=True)
-            hidden_states = output.hidden_states[-1]  # Last hidden layer (batch_size, seq_length, hidden_dim)
-            # Extract the embedding for the <|end_of_text|> token (e_t)
-            eos_positions = (input_ids == tokenizer.eos_token_id).nonzero(as_tuple=True)
-            # Check if eos_positions is empty
-            if eos_positions[0].numel() != input_ids.size(0):
-                raise ValueError("Not all sequences in the batch contain the EOS token.")
-            doc_embeddings = hidden_states[eos_positions]  # Shape: (batch_size, hidden_dim)
-            embeddings_docs.append(doc_embeddings)
-    embeddings_docs = torch.cat(embeddings_docs, dim=0)  # Combine batches
+    model.eval()
 
+    print("Embedding docs and queries...", end="")
     embeddings_queries = []
     with torch.no_grad():
-        for input_ids, attention_mask in tqdm(query_loader):
-            batch = {"input_ids": input_ids.to(device), "attention_mask": attention_mask.to(device)}
-            output = model(**batch, output_hidden_states=True)
-            hidden_states = output.hidden_states[-1]  # Last hidden layer (batch_size, seq_length, hidden_dim)
-            # Extract the embedding for the <|end_of_text|> token (e_t)
-            eos_positions = (input_ids == tokenizer.eos_token_id).nonzero(as_tuple=True)
-            # Check if eos_positions is empty
-            if eos_positions[0].numel() < input_ids.size(0):
-                raise ValueError("Not all sequences in the batch contain the EOS token.")
-            query_embeddings = hidden_states[eos_positions]  # Shape: (batch_size, hidden_dim)
-            embeddings_queries.append(query_embeddings)
+        for input_ids, attention_mask in tqdm(query_loader, desc="Embedding queries"):
+            query_embeds = get_eos_embeddings(model, input_ids.to(device), attention_mask.to(device), tokenizer)
+            embeddings_queries.append(query_embeds)
     embeddings_queries = torch.cat(embeddings_queries, dim=0)  # Combine batches
-    print("Embeddings done.")
+    print("Done.")
 
-    embeddings_docs = F.normalize(embeddings_docs, p=2, dim=-1)
-    embeddings_queries = F.normalize(embeddings_queries, p=2, dim=-1)
+    embeddings_docs = []
+    with torch.no_grad():
+        for input_ids, attention_mask in tqdm(doc_loader, desc="Embedding docs"):
+            doc_embeds = get_eos_embeddings(model, input_ids.to(device), attention_mask.to(device), tokenizer)
+            embeddings_docs.append(doc_embeds)
+    embeddings_docs = torch.cat(embeddings_docs, dim=0)  # Combine batches
 
     run = compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs)
     return run
@@ -377,3 +399,53 @@ def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs,
         reranked_run[query_id] = {curr_doc_ids[j]: float(similarity_scores[j]) for j in range(len(curr_doc_ids))}
 
     return merge_reranked_into_full_run(run, reranked_run)
+
+
+def get_eval_metrics(run, qrels_dev_df, all_docids, metrics):
+    # Evaluate BM25
+    # qrels = {query_id: {doc_id: relevance, ...},
+    #          query_id: {doc_id: relevance, ...}, ...},
+    # convert qrels_dev_df to qrels dict
+    qrels = {}
+    for _, row in qrels_dev_df.iterrows():
+        qrels[str(row["query_id"])] = {str(docid): 0 for docid in all_docids}
+        qrels[str(row["query_id"])][str(row["doc_id"])] = 1
+    
+    evaluator = pytrec_eval.RelevanceEvaluator(qrels, metrics)
+    results = evaluator.evaluate(run)
+    print("Evaluation done.")
+
+    result_values = list(results.values())
+    metric_names = list(result_values[0].keys())      # because some result names change e.g. from ndcg_cut.10 to ndcg_cut_10
+    metric_sums = {metric_name: 0 for metric_name in metric_names}
+    for metrics_ in results.values():
+        for metric in metric_names:
+            metric_sums[metric] += metrics_[metric]
+    
+    # Average metrics over all queries
+    # assert len(results) == len(query_ids)
+    avg_metrics = {metric_name: metric_sums[metric_name]/len(results) for metric_name in metric_names}
+    
+    print("\nResults:")
+    for metric_name, metric_value in avg_metrics.items():
+        print(f"Average {metric_name}: {metric_value}")
+
+    print("\n")
+    
+    return avg_metrics
+
+
+def create_results_file(run):
+    """
+    run has the following stucture:
+    run[str(query_ids[i])] = {str(doc_ids[j]): float(query_sim[j]) for j in range(len(doc_ids))}
+    {query_id: {doc_id: similarity, ...}, ...}
+    """
+    # sort run dict by similarity
+    for query_id in run:
+        run[query_id] = dict(sorted(run[query_id].items(), key=lambda x: x[1], reverse=True)[:10])
+    
+    with open("results.txt", "w") as f:
+        for query_id, doc_dict in run.items():
+            for i, (doc_id, similarity) in enumerate(doc_dict.items()):
+                f.write(f"{query_id}\t{doc_id}\t{i+1}\n")

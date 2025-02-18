@@ -6,9 +6,13 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from unsloth import FastLanguageModel
 from utils.train_utils import (
-    tokenize_with_hard_negatives_msmarco,
     tokenize_with_hard_negatives_messirve,
-    custom_data_collator
+    custom_data_collator,
+    get_msmarco_queries,
+    get_msmarco_passages,
+    get_msmarco_hard_negatives,
+    tokenize_train_ds_msmarco,
+    tokenize_test_ds_msmarco
 )
 from peft import LoraConfig, TaskType, get_peft_model
 import pickle
@@ -26,85 +30,6 @@ print("Max query len:", MAX_QUERY_LEN)
 print("Max doc len:", MAX_DOC_LEN)
 
 
-def get_msmarco_queries():
-    print("Loading MS MARCO queries...", end="")
-    save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", "qid_to_query.pkl")
-    if os.path.exists(save_path):
-        with open(save_path, "rb") as f:
-            qid_to_query = pickle.load(f)
-    else:
-        query_dataset = load_dataset("sentence-transformers/msmarco-corpus", "query", split="train")
-        qid_to_query = dict(zip(query_dataset["qid"], query_dataset["text"]))
-        # print(qid_to_query[571018])
-        # => "what are the liberal arts?"
-        with open(save_path, "wb") as f:
-            pickle.dump(qid_to_query, f)
-    print("Done")
-    return qid_to_query
-
-def get_msmarco_passages():
-    print("Loading MS MARCO passages...", end="")
-    save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", "pid_to_passage.pkl")
-    if os.path.exists(save_path):
-        with open(save_path, "rb") as f:
-            pid_to_passage = pickle.load(f)
-    else:
-        passage_dataset = load_dataset("sentence-transformers/msmarco-corpus", "passage", split="train")
-        pid_to_passage = dict(zip(passage_dataset["pid"], passage_dataset["text"]))
-        # print(pid_to_passage[7349777])
-        # => "liberal arts. 1. the academic course of instruction at a college 
-        with open(save_path, "wb") as f:
-            pickle.dump(pid_to_passage, f)
-    print("Done")
-    return pid_to_passage
-
-
-def get_msmarco_hard_negatives(num_negs, reload=False):
-    print("Loading hard negatives...", end="")
-    save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", f"negatives_{num_negs}_msmarco.pkl")
-    if os.path.exists(save_path) and not reload:
-        with open(save_path, "rb") as f:
-            negs_ds = pickle.load(f)
-    else:
-        negs_ds = load_dataset("sentence-transformers/msmarco-msmarco-distilbert-base-tas-b", "triplet-50-ids")
-        negs_ds = negs_ds["train"]
-        remove_cols = [f"negative_{i+1}" for i in range(num_negs, 50)]
-        negs_ds = negs_ds.map(lambda x: x, remove_columns=remove_cols)
-        # save to disk
-        with open(save_path, "wb") as f:
-            pickle.dump(negs_ds, f)
-    print("Done")
-    return negs_ds
-
-
-def tokenize_train_ds_msmarco(tokenizer, train_ds_pre, qid_to_query, pid_to_passage, num_negs):
-    print("Tokenizing train dataset...", end="")
-    save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", f"train_ds_msmarco_{num_negs}negs_50k.pkl")
-    if os.path.exists(save_path):
-        with open(save_path, "rb") as f:
-            train_ds = pickle.load(f)
-    else:
-        train_ds = train_ds_pre.map(lambda x: tokenize_with_hard_negatives_msmarco(tokenizer, x, qid_to_query, pid_to_passage, num_negs, MAX_QUERY_LEN, MAX_DOC_LEN), batched=True)
-        with open(save_path, "wb") as f:
-            pickle.dump(train_ds, f)
-    print("Done")
-    return train_ds
-
-    
-def tokenize_test_ds_msmarco(tokenizer, test_ds_pre, qid_to_query, pid_to_passage, num_negs):
-    print("Tokenizing test dataset...", end="")
-    save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", f"test_ds_msmarco_{num_negs}negs_50k.pkl")
-    if os.path.exists(save_path):
-        with open(save_path, "rb") as f:
-            test_ds = pickle.load(f)
-    else:
-        test_ds = test_ds_pre.map(lambda x: tokenize_with_hard_negatives_msmarco(tokenizer, x, qid_to_query, pid_to_passage, num_negs, MAX_QUERY_LEN, MAX_DOC_LEN), batched=True)
-        with open(save_path, "wb") as f:
-            pickle.dump(test_ds, f)
-    print("Done")
-    return test_ds
-    
-
 def train():
     which = "msmarco"
 
@@ -114,7 +39,7 @@ def train():
         num_negs = 5
         print("Training on MS MARCO dataset...")
         negs_ds = get_msmarco_hard_negatives(num_negs, reload=True)
-        negs_ds = negs_ds.select(range(50_000))
+        negs_ds = negs_ds.select(range(100_000))
 
         # split negs_ds into train and eval sets with a 90/10 ratio
         split = negs_ds.train_test_split(test_size=0.1, seed=42)
@@ -137,10 +62,10 @@ def train():
 
     # if 'helga_g' in STORAGE_DIR:
     if False:
-        model = AutoModelForCausalLM.from_pretrained(checkpoint)
+        model = AutoModelForCausalLM.from_pretrained(checkpoint, torch_dtype=torch.bfloat16)
         tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
         lora_config = LoraConfig(
-            r=8,
+            r=16,
             lora_alpha=16,
             lora_dropout=0.05,
             bias="none",
@@ -158,7 +83,7 @@ def train():
             # "unsloth/Qwen2.5-0.5B", "unsloth/Qwen2.5-1.5B", "unsloth/Qwen2.5-3B"
             # "unsloth/Qwen2.5-14B",  "unsloth/Qwen2.5-32B",  "unsloth/Qwen2.5-72B",
             # And also all Instruct versions and Math. Coding verisons!
-            model_name = "unsloth/Qwen2.5-0.5B",
+            model_name = "unsloth/Qwen2.5-3B-Instruct",
             max_seq_length = MAX_DOC_LEN,
             dtype = "bf16",
             load_in_4bit = False,
@@ -168,7 +93,7 @@ def train():
 
         model = FastLanguageModel.get_peft_model(
             model,
-            r = 16, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
+            r = 8, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
             target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
                             "gate_proj", "up_proj", "down_proj",],
             lora_alpha = 16,
@@ -183,22 +108,22 @@ def train():
     
     if which == "msmarco":
         # Apply tokenization to the dataset
-        train_ds = tokenize_train_ds_msmarco(tokenizer, train_ds, qid_to_query, pid_to_passage, num_negs)
-        test_ds = tokenize_test_ds_msmarco(tokenizer, test_ds, qid_to_query, pid_to_passage, num_negs)
+        train_ds = tokenize_train_ds_msmarco(tokenizer, train_ds, qid_to_query, pid_to_passage, num_negs, reuse=False)
+        test_ds = tokenize_test_ds_msmarco(tokenizer, test_ds, qid_to_query, pid_to_passage, num_negs, reuse=False)
     else:
         # Apply tokenization to the dataset
         train_ds = train_ds.map(lambda x: tokenize_with_hard_negatives_messirve(tokenizer, x, append_eos=True), batched=True)
         test_ds = test_ds.map(lambda x: tokenize_with_hard_negatives_messirve(tokenizer, x, append_eos=True), batched=True)
 
-    output_dir = os.path.join(STORAGE_DIR, "ms_marco_passage", "results", "results_IR_ms_marco")
+    output_dir = os.path.join(STORAGE_DIR, "ms_marco_passage", "results", "IR_ms_marco_unsloth_qwen3B_100k")
 
-    batch_size = 16
+    batch_size = 8
     gradient_accumulation_steps = 4
     epochs = 1
 
     # Compute total steps given your dataset and hyperparameters
     total_steps = (len(train_ds) // (batch_size * gradient_accumulation_steps)) * epochs
-    eval_steps = total_steps // epochs // 5
+    eval_steps = total_steps // epochs // 4
 
     # Define TrainingArguments
     training_args = TrainingArguments(
@@ -246,7 +171,7 @@ def train():
     torch.save(trainer.state.log_history, os.path.join(output_dir, "training_metrics_hf.pth"))
     tokenizer.save_pretrained(output_dir)
 
-    # evaluation.run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", model_instance=model, tokenizer=tokenizer, reuse_run=False)
+    evaluation.run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, ds="msmarco", model_instance=model, tokenizer=tokenizer, reuse_run=False)
 
 if __name__ == "__main__":
     train()

@@ -1,5 +1,139 @@
 from config import MAX_QUERY_LEN, MAX_DOC_LEN
 from tqdm import tqdm
+import os
+import pickle
+from datasets import load_dataset
+import torch
+from config import STORAGE_DIR
+from torch.nn import functional as F
+
+
+def get_msmarco_queries():
+    print("Loading MS MARCO queries...", end="")
+    save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", "qid_to_query.pkl")
+    if os.path.exists(save_path):
+        with open(save_path, "rb") as f:
+            qid_to_query = pickle.load(f)
+    else:
+        query_dataset = load_dataset("sentence-transformers/msmarco-corpus", "query", split="train")
+        qid_to_query = dict(zip(query_dataset["qid"], query_dataset["text"]))
+        # print(qid_to_query[571018])
+        # => "what are the liberal arts?"
+        with open(save_path, "wb") as f:
+            pickle.dump(qid_to_query, f)
+    print("Done")
+    return qid_to_query
+
+
+def get_msmarco_passages():
+    print("Loading MS MARCO passages...", end="")
+    save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", "pid_to_passage.pkl")
+    if os.path.exists(save_path):
+        with open(save_path, "rb") as f:
+            pid_to_passage = pickle.load(f)
+    else:
+        passage_dataset = load_dataset("sentence-transformers/msmarco-corpus", "passage", split="train")
+        pid_to_passage = dict(zip(passage_dataset["pid"], passage_dataset["text"]))
+        # print(pid_to_passage[7349777])
+        # => "liberal arts. 1. the academic course of instruction at a college 
+        with open(save_path, "wb") as f:
+            pickle.dump(pid_to_passage, f)
+    print("Done")
+    return pid_to_passage
+
+
+def get_msmarco_hard_negatives(num_negs, reload=False):
+    print("Loading hard negatives...", end="")
+    save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", f"negatives_{num_negs}_msmarco.pkl")
+    if os.path.exists(save_path) and not reload:
+        with open(save_path, "rb") as f:
+            negs_ds = pickle.load(f)
+    else:
+        negs_ds = load_dataset("sentence-transformers/msmarco-msmarco-distilbert-base-tas-b", "triplet-50-ids")
+        negs_ds = negs_ds["train"]
+        remove_cols = [f"negative_{i+1}" for i in range(num_negs, 50)]
+        negs_ds = negs_ds.map(lambda x: x, remove_columns=remove_cols)
+        # save to disk
+        with open(save_path, "wb") as f:
+            pickle.dump(negs_ds, f)
+    print("Done")
+    return negs_ds
+
+
+def tokenize_train_ds_msmarco(tokenizer, train_ds_pre, qid_to_query, pid_to_passage, num_negs, reuse=False):
+    print("Tokenizing train dataset...", end="")
+    save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", f"train_ds_msmarco_{num_negs}negs_50k.pkl")
+    if os.path.exists(save_path) and reuse:
+        with open(save_path, "rb") as f:
+            train_ds = pickle.load(f)
+    else:
+        train_ds = train_ds_pre.map(lambda x: tokenize_with_hard_negatives_msmarco(tokenizer, x, qid_to_query, pid_to_passage, num_negs, MAX_QUERY_LEN, MAX_DOC_LEN), batched=True)
+        with open(save_path, "wb") as f:
+            pickle.dump(train_ds, f)
+    print("Done")
+    return train_ds
+
+
+def tokenize_test_ds_msmarco(tokenizer, test_ds_pre, qid_to_query, pid_to_passage, num_negs, reuse=False):
+    print("Tokenizing test dataset...", end="")
+    save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", f"test_ds_msmarco_{num_negs}negs_50k.pkl")
+    if os.path.exists(save_path) and reuse:
+        with open(save_path, "rb") as f:
+            test_ds = pickle.load(f)
+    else:
+        test_ds = test_ds_pre.map(lambda x: tokenize_with_hard_negatives_msmarco(tokenizer, x, qid_to_query, pid_to_passage, num_negs, MAX_QUERY_LEN, MAX_DOC_LEN), batched=True)
+        with open(save_path, "wb") as f:
+            pickle.dump(test_ds, f)
+    print("Done")
+    return test_ds
+
+
+def get_eos_embeddings(model, input_ids, attention_mask, tokenizer):
+    """
+    Extract L2-normalized embeddings of exactly one EOS token per sequence.
+    Assumes:
+      - Each sequence in `input_ids` has exactly one EOS token.
+      - That EOS token is `tokenizer.eos_token_id`.
+    Raises an error if any sequence has zero or multiple EOS tokens.
+    """
+    outputs = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        output_hidden_states=True,
+        use_cache=False
+    )
+    hidden_states = outputs.hidden_states[-1]  # (batch_size, seq_len, hidden_dim)
+
+    batch_size = input_ids.size(0)      # for hard negs it is batch_size*n_neg
+    eos_id = tokenizer.eos_token_id
+
+    # 1) Find positions of all eos_id tokens in the batch
+    # eos_positions is (row_indices, col_indices), each shape (#eos_tokens_found,)
+    eos_positions = (input_ids == eos_id).nonzero(as_tuple=True)
+    row_indices, col_indices = eos_positions
+
+    # 2) Assert that the number of EOS tokens found == batch_size
+    if row_indices.size(0) != batch_size:
+        raise ValueError(
+            f"Expected exactly 1 EOS token per sequence, "
+            f"but found {row_indices.size(0)} matches for {batch_size} sequences."
+        )
+
+    # 3) Check that each sequence index appears exactly once
+    #    i.e., no sequence is missing an EOS or has multiple
+    unique_rows, counts = row_indices.unique(return_counts=True)
+    if unique_rows.size(0) < batch_size:
+        raise ValueError("At least one sequence does not contain any EOS token.")
+    if (counts > 1).any():
+        raise ValueError("At least one sequence has multiple EOS tokens.")
+
+    # 4) Gather the embeddings for the single EOS token per sequence
+    eos_embeds = hidden_states[row_indices, col_indices, :]  # shape (batch_size, hidden_dim)
+
+    # 5) Normalize embeddings to unit L2 norm
+    eos_embeds = F.normalize(eos_embeds, p=2, dim=-1)
+
+    return eos_embeds
 
 
 def tokenize_with_manual_eos(tokenizer, text_list, max_length):
@@ -169,8 +303,6 @@ def custom_data_collator(batch):
 
       QUESTION: Are we assuming that the query length is the same as the doc length?
     """
-    import torch
-
     # -- Queries --
     query_input_ids = torch.stack(
         [torch.tensor(example["query_input_ids"], dtype=torch.long) for example in batch],

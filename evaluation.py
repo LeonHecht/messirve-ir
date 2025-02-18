@@ -2,12 +2,13 @@ import sys
 print("Executable: ", sys.executable)
 from models import model_setup
 from datasets import load_dataset
+import pandas as pd
 import pickle
 import os
-import pytrec_eval
 from sentence_transformers import SentenceTransformer
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import msmarco_eval_ranking
 from utils.retrieval_utils import (
     embed_bge,
     embed_jinja,
@@ -15,21 +16,64 @@ from utils.retrieval_utils import (
     retrieve_bm25,
     embed_s_transformers,
     rerank_cross_encoder,
-    embed_qwen
+    embed_qwen,
+    get_eval_metrics,
+    create_results_file
 )
 
+from utils.train_utils import (
+    get_msmarco_queries,
+    get_msmarco_passages
+)
 # make only GPU0 visible
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
+from config import STORAGE_DIR
 
 from models.model_setup import get_bge_m3_model, get_jinja_model
 
-def run(model, metrics, country, model_instance=None, tokenizer=None, reranker_model=None, reuse_run=False, rerank=False):
-    print("Starting Evaluation")
+
+def get_messirve_corpus(country):
     ds = load_dataset("spanish-ir/messirve", country)
     docs = ds["test"]["docid_text"]
     queries = ds["test"]["query"]
     doc_ids = ds["test"]["docid"]
     query_ids = ds["test"]["id"]
+    return docs, queries, doc_ids, query_ids
+
+
+def run(model, metrics, model_instance=None, tokenizer=None, reranker_model=None, reuse_run=False, rerank=False, ds="msmarco", country=None):
+    print("Starting Evaluation")
+    if ds == "msmarco":
+        qid_to_query = get_msmarco_queries()
+        pid_to_passage = get_msmarco_passages()
+
+        limit = 100_000
+        
+        docs = list(pid_to_passage.values())[:limit]
+        doc_ids = list(pid_to_passage.keys())[:limit]
+        
+        qrels_dev_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", "qrels.dev.tsv")
+        qrels_dev_df = pd.read_csv(
+            qrels_dev_path,
+            sep="\t",                # TREC qrels are usually tab-separated
+            names=["query_id", "iteration", "doc_id", "relevance"],
+            header=None,            # There's no header in qrels files
+            dtype={"query_id": int, "iteration": int, "doc_id": int, "relevance": int}
+        )
+
+        # filter qrels to only include doc_ids that are in the top 10_000 docs
+        qrels_dev_df = qrels_dev_df[qrels_dev_df["doc_id"].isin(doc_ids)]
+
+        # save qrels_dev_df to tsv file
+        path_to_reference = f"qrels_dev_{limit}.tsv"
+        qrels_dev_df.to_csv(path_to_reference, sep="\t", index=False, header=False)
+
+        query_ids = qrels_dev_df["query_id"].unique()
+        queries = [qid_to_query[qid] for qid in query_ids]
+        rel_doc_ids = qrels_dev_df["doc_id"].unique()
+    else:
+        docs, queries, doc_ids, query_ids = get_messirve_corpus(country)
     print("Data prepared.")
 
     # # read corpus from pickle file
@@ -39,7 +83,7 @@ def run(model, metrics, country, model_instance=None, tokenizer=None, reranker_m
     # docs = corpus["corpus"]["text"]
     # doc_ids = corpus["corpus"]["docid"]
 
-    device = torch.device("cuda")
+    device = torch.device("cuda:1")
 
     if model == "bm25":
         run_path = f"run_bm25_{country}.pkl"
@@ -74,7 +118,7 @@ def run(model, metrics, country, model_instance=None, tokenizer=None, reranker_m
         if not os.path.exists(run_path) or not reuse_run:
             model = get_jinja_model()
             model.to(device)
-            run = embed_jinja(model, docs, queries, doc_ids, query_ids, reuse_run)
+            run = embed_jinja(model, docs, queries, doc_ids, query_ids)
             # save run to disk using pickle
             with open(run_path, "wb") as f:
                 print("Dumping run to pickle file...")
@@ -131,7 +175,7 @@ def run(model, metrics, country, model_instance=None, tokenizer=None, reranker_m
             # tokenizer.add_special_tokens({'pad_token': '[PAD]'})
             # model = AutoModelForCausalLM.from_pretrained(checkpoint)
             # model.resize_token_embeddings(len(tokenizer))
-            # device = "cuda:0"
+            device = "cuda"
             model_instance.to(device)
             run = embed_qwen(model_instance, tokenizer, docs, queries, doc_ids, query_ids)
     else:
@@ -142,47 +186,26 @@ def run(model, metrics, country, model_instance=None, tokenizer=None, reranker_m
         run = rerank_cross_encoder(reranker_model, tokenizer, run, 50, queries, query_ids, docs, doc_ids,
                                    max_length=512)
     
-    # Evaluate BM25
-    # qrels = {query_id: {doc_id: relevance, ...},
-    #          query_id: {doc_id: relevance, ...}, ...},
-    qrels = {}
-    for query_id, rel_doc_id in zip(query_ids, doc_ids):
-        # put all qrels to 0
-        qrels[str(query_id)] = {str(doc_id): 0 for doc_id in doc_ids}
-        # set the qrel for the relevant doc to 1 (assuming 1 relevant doc per query)
-        qrels[str(query_id)][str(rel_doc_id)] = 1
-    print("Qrels prepared.")
-
-    evaluator = pytrec_eval.RelevanceEvaluator(qrels, metrics)
-    results = evaluator.evaluate(run)
-    print("Evaluation done.")
-
-    result_values = list(results.values())
-    metric_names = list(result_values[0].keys())      # because some result names change e.g. from ndcg_cut.10 to ndcg_cut_10
-    metric_sums = {metric_name: 0 for metric_name in metric_names}
-    for metrics_ in results.values():
-        for metric in metric_names:
-            metric_sums[metric] += metrics_[metric]
-    
-    # Average metrics over all queries
-    assert len(results) == len(queries)
-    avg_metrics = {metric_name: metric_sums[metric_name]/len(queries) for metric_name in metric_names}
-    
-    print("\nResults:")
-    for metric_name, metric_value in avg_metrics.items():
-        print(f"Average {metric_name}: {metric_value}")
-
-    print("\n")
-    
-    return avg_metrics
+    get_eval_metrics(run, qrels_dev_df, doc_ids, metrics)
+    create_results_file(run)
+    msmarco_eval_ranking.main(path_to_reference, "results.txt")
 
 
 def main():
     from unsloth import FastLanguageModel
     # from transformers import AutoModelForCausalLM
-    model, tokenizer = FastLanguageModel.from_pretrained("/media/discoexterno/leon/qwen-2-vec/results_IR/checkpoint-705")
-    # tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
-    run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", model_instance=model, tokenizer=tokenizer, reuse_run=False)
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        "/media/discoexterno/leon/ms_marco_passage/results/results_IR_ms_marco_full/checkpoint-3600",
+        max_seq_length = 256,
+        dtype = "bf16",
+        load_in_4bit = False
+    )
+    # model = AutoModelForCausalLM.from_pretrained(
+    #     "/media/discoexterno/leon/ms_marco_passage/results/results_IR_ms_marco_test/checkpoint-1406",
+    #     torch_dtype=torch.bfloat16
+    # )
+    # tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+    run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, model_instance=model, tokenizer=tokenizer, ds="msmarco", reuse_run=False)
 
 
 if __name__ == "__main__":
@@ -191,9 +214,8 @@ if __name__ == "__main__":
     # model = SentenceTransformer("sentence-transformers/distiluse-base-multilingual-cased-v2")
     # tokenizer = AutoTokenizer.from_pretrained("FacebookAI/xlm-roberta-base")
     # run(model="sentence-transformer", model_instance=model, metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False, rerank=False)
-    # run(model="qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False)
     # run(model="bge-finetuned", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar")
-    # run(model="jinja", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
+    # run(model="jinja", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, reuse_run=False, ds="msmarco")
     # run(model="mamba", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
     # run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", model_instance=model, reuse_run=False)
     # run("bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False)
