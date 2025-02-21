@@ -108,8 +108,16 @@ class InfoNCERetrievalTrainer(Trainer):
 #     print(f"{module} output norm: {output.norm().item()}")
 
 
-# from trl import SFTTrainer
-class InfoNCERetrievalTrainerHNLLM(Trainer):
+from trl import SFTTrainer
+class InfoNCERetrievalTrainerHNLLM(SFTTrainer):
+    def _prepare_dataset(self, dataset, *args, **kwargs):
+        # Assume the dataset is already tokenized.
+        return dataset
+    
+    def _move_model_to_device(self, model, device):
+        # Skip moving the model, as it's already on the correct device.
+        return model
+    
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         """
         Compute InfoNCE loss with hard negatives only.
@@ -123,7 +131,6 @@ class InfoNCERetrievalTrainerHNLLM(Trainer):
             Loss or (Loss, Outputs)
         """
         num_negatives = inputs["neg_input_ids"].size(1) # shape: (batch_size, n_neg, doc_seq_len)
-        assert num_negatives == 5, "Number of hard negatives should be 5."
 
         # Extract query and document inputs
         query_inputs = {
@@ -201,7 +208,6 @@ class InfoNCERetrievalTrainerHNLLM(Trainer):
         #         module.register_forward_hook(hook_fn)
 
         num_negatives = inputs["neg_input_ids"].size(1)
-        assert num_negatives == 5, "Number of hard negatives should be 5."
 
         query_inputs = {
             "input_ids": inputs["query_input_ids"],

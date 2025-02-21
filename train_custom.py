@@ -20,9 +20,9 @@ import evaluation
 from datasets import load_dataset
 import sys
 print("Executable", sys.executable)
+import json
 import os
-# make only GPU0 visible
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 from config import MAX_QUERY_LEN, MAX_DOC_LEN, STORAGE_DIR
 
@@ -36,17 +36,26 @@ def train():
     if which == "msmarco":
         qid_to_query = get_msmarco_queries()
         pid_to_passage = get_msmarco_passages()
+        
+        with open("qid_to_response.json", "r", encoding='utf-8') as f:
+            qid_to_response = json.load(f)
+
         num_negs = 5
         print("Training on MS MARCO dataset...")
         negs_ds = get_msmarco_hard_negatives(num_negs, reload=True)
-        negs_ds = negs_ds.select(range(100_000))
+        negs_ds = negs_ds.select(range(50_000))
+
+        for example in negs_ds:
+            qid = example["query"]
+            response = qid_to_response[str(qid)]
+            example["query"] = response
 
         # split negs_ds into train and eval sets with a 90/10 ratio
         split = negs_ds.train_test_split(test_size=0.1, seed=42)
         train_ds = split["train"]
         test_ds = split["test"]
 
-        checkpoint = STORAGE_DIR + "/qwen-2-vec/run_89622_texts_1_epoch/output-model/checkpoint-2500"
+        # checkpoint = STORAGE_DIR + "/qwen-2-vec/run_89622_texts_1_epoch/output-model/checkpoint-2500"
     else:
         country = "ar"
         print(f"Training on {country} dataset...")
@@ -83,7 +92,7 @@ def train():
             # "unsloth/Qwen2.5-0.5B", "unsloth/Qwen2.5-1.5B", "unsloth/Qwen2.5-3B"
             # "unsloth/Qwen2.5-14B",  "unsloth/Qwen2.5-32B",  "unsloth/Qwen2.5-72B",
             # And also all Instruct versions and Math. Coding verisons!
-            model_name = "unsloth/Qwen2.5-3B-Instruct",
+            model_name = "unsloth/Qwen2.5-0.5B-Instruct",
             max_seq_length = MAX_DOC_LEN,
             dtype = "bf16",
             load_in_4bit = False,
@@ -91,18 +100,21 @@ def train():
             # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
         )
 
+        print(tokenizer.pad_token_id)   # 128004
+        print(tokenizer.pad_token)      # <|finetune_right_pad_id|>
+
         model = FastLanguageModel.get_peft_model(
             model,
-            r = 8, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
+            r = 128, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
             target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
                             "gate_proj", "up_proj", "down_proj",],
-            lora_alpha = 16,
+            lora_alpha = 64,
             lora_dropout = 0, # Supports any, but = 0 is optimized
             bias = "none",    # Supports any, but = "none" is optimized
             # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
-            # use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
+            use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
             random_state = 3407,
-            use_rslora = False,  # We support rank stabilized LoRA
+            use_rslora = True,  # We support rank stabilized LoRA
             loftq_config = None, # And LoftQ
         )
     
@@ -115,9 +127,10 @@ def train():
         train_ds = train_ds.map(lambda x: tokenize_with_hard_negatives_messirve(tokenizer, x, append_eos=True), batched=True)
         test_ds = test_ds.map(lambda x: tokenize_with_hard_negatives_messirve(tokenizer, x, append_eos=True), batched=True)
 
-    output_dir = os.path.join(STORAGE_DIR, "ms_marco_passage", "results", "IR_ms_marco_unsloth_qwen3B_100k")
+    output_dir = os.path.join(STORAGE_DIR, "ms_marco_passage", "results", "IR_unsloth_qwen0.5_5negs_rslora_50k_SFT_GPT")
+    print("Output dir:", output_dir)
 
-    batch_size = 8
+    batch_size = 16
     gradient_accumulation_steps = 4
     epochs = 1
 
@@ -147,7 +160,10 @@ def train():
         fp16=False,
         bf16=True,
         # gradient_checkpointing=True,
+        # optim = "adamw_8bit",
     )
+
+    training_args.dataset_kwargs = {"skip_prepare_dataset": True}
 
     # Create Trainer Instance
     trainer = InfoNCERetrievalTrainerHNLLM(
@@ -167,11 +183,11 @@ def train():
     # print(metrics)
 
     # Save the Model
-    trainer.save_model(os.path.join(output_dir, "saved_model"))
+    model.save_pretrained(os.path.join(output_dir, "saved_model"))
     torch.save(trainer.state.log_history, os.path.join(output_dir, "training_metrics_hf.pth"))
-    tokenizer.save_pretrained(output_dir)
+    tokenizer.save_pretrained(os.path.join(output_dir, "saved_model"))
 
-    evaluation.run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, ds="msmarco", model_instance=model, tokenizer=tokenizer, reuse_run=False)
+    evaluation.run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, ds="msmarco", model_instance=model, tokenizer=tokenizer, reuse_run=False)
 
 if __name__ == "__main__":
     train()

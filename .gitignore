@@ -60,3 +60,9 @@ unsloth_compiled_cache/
 *.txt
 
 *.tsv
+
+*.png
+
+*.jsonl
+
+*.json

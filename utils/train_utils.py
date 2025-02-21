@@ -60,28 +60,28 @@ def get_msmarco_hard_negatives(num_negs, reload=False):
     return negs_ds
 
 
-def tokenize_train_ds_msmarco(tokenizer, train_ds_pre, qid_to_query, pid_to_passage, num_negs, reuse=False):
-    print("Tokenizing train dataset...", end="")
+def tokenize_train_ds_msmarco(tokenizer, train_ds, qid_to_query, pid_to_passage, num_negs, reuse=False):
+    print("Tokenizing train dataset...")
     save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", f"train_ds_msmarco_{num_negs}negs_50k.pkl")
     if os.path.exists(save_path) and reuse:
         with open(save_path, "rb") as f:
             train_ds = pickle.load(f)
     else:
-        train_ds = train_ds_pre.map(lambda x: tokenize_with_hard_negatives_msmarco(tokenizer, x, qid_to_query, pid_to_passage, num_negs, MAX_QUERY_LEN, MAX_DOC_LEN), batched=True)
+        train_ds = train_ds.map(lambda x: tokenize_with_hard_negatives_msmarco(tokenizer, x, qid_to_query, pid_to_passage, num_negs, MAX_QUERY_LEN, MAX_DOC_LEN), batched=True)
         with open(save_path, "wb") as f:
             pickle.dump(train_ds, f)
     print("Done")
     return train_ds
 
 
-def tokenize_test_ds_msmarco(tokenizer, test_ds_pre, qid_to_query, pid_to_passage, num_negs, reuse=False):
-    print("Tokenizing test dataset...", end="")
+def tokenize_test_ds_msmarco(tokenizer, test_ds, qid_to_query, pid_to_passage, num_negs, reuse=False):
+    print("Tokenizing test dataset...")
     save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", f"test_ds_msmarco_{num_negs}negs_50k.pkl")
     if os.path.exists(save_path) and reuse:
         with open(save_path, "rb") as f:
             test_ds = pickle.load(f)
     else:
-        test_ds = test_ds_pre.map(lambda x: tokenize_with_hard_negatives_msmarco(tokenizer, x, qid_to_query, pid_to_passage, num_negs, MAX_QUERY_LEN, MAX_DOC_LEN), batched=True)
+        test_ds = test_ds.map(lambda x: tokenize_with_hard_negatives_msmarco(tokenizer, x, qid_to_query, pid_to_passage, num_negs, MAX_QUERY_LEN, MAX_DOC_LEN), batched=True)
         with open(save_path, "wb") as f:
             pickle.dump(test_ds, f)
     print("Done")
@@ -129,6 +129,15 @@ def get_eos_embeddings(model, input_ids, attention_mask, tokenizer):
 
     # 4) Gather the embeddings for the single EOS token per sequence
     eos_embeds = hidden_states[row_indices, col_indices, :]  # shape (batch_size, hidden_dim)
+
+    # # Use attention mask to get the index of the last non-pad token in each sequence.
+    # last_token_idx = attention_mask.sum(dim=1) - 1
+    # batch_indices = torch.arange(input_ids.size(0), device=input_ids.device)
+    
+    # last_token_ids = input_ids[batch_indices, last_token_idx]
+    # assert (last_token_ids == tokenizer.eos_token_id).all(), "Not all sequences end with the EOS token."
+    
+    # eos_embeds = hidden_states[batch_indices, last_token_idx, :]
 
     # 5) Normalize embeddings to unit L2 norm
     eos_embeds = F.normalize(eos_embeds, p=2, dim=-1)
@@ -234,24 +243,18 @@ def tokenize_with_hard_negatives_msmarco(tokenizer, examples: dict, qid_to_query
 
     # Flatten the list of hard negatives for tokenization
     flattened_negatives = []
-    for i in tqdm(range(num_negs)):
+    for i in range(num_negs):
         neg_pids = examples[f"negative_{i+1}"]
         flattened_negatives.extend([pid_to_passage[neg_pid] for neg_pid in neg_pids])
     
-    print("Starting tokenization of queries...", end="")
     # Tokenize queries
     tokenized_queries = tokenize_with_manual_eos(tokenizer, queries, max_length=max_query_len)
-    print("Done")
 
-    print("Starting tokenization of positive documents...", end="")
     # Tokenize positive documents
     tokenized_docs = tokenize_with_manual_eos(tokenizer, positives, max_length=max_doc_len)
-    print("Done")
 
-    print("Starting tokenization of hard negatives...", end="")
     # Tokenize hard negatives (flattened)
     tokenized_all_negatives = tokenize_with_manual_eos(tokenizer, flattened_negatives, max_length=max_doc_len)
-    print("Done")
 
     # Rolling index to rebuild the structure
     rolling_index = 0

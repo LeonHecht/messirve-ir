@@ -185,7 +185,7 @@ def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
     device = next(model.parameters()).device  # Automatically detect model's device
     print("Device: ", device)
 
-    inputs_docs = tokenize_with_manual_eos(tokenizer, docs, MAX_DOC_LEN)
+    inputs_docs = tokenize_with_manual_eos(tokenizer, docs, max_length=MAX_DOC_LEN)
     inputs_queries = tokenize_with_manual_eos(tokenizer, queries, max_length=MAX_QUERY_LEN)
 
     print("Docs and queries tokenized.")
@@ -201,8 +201,6 @@ def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
 
     doc_loader = DataLoader(doc_dataset, batch_size=batch_size, pin_memory=True)
     query_loader = DataLoader(query_dataset, batch_size=batch_size, pin_memory=True)
-
-    model.eval()
 
     print("Embedding docs and queries...", end="")
     embeddings_queries = []
@@ -408,7 +406,8 @@ def get_eval_metrics(run, qrels_dev_df, all_docids, metrics):
     # convert qrels_dev_df to qrels dict
     qrels = {}
     for _, row in qrels_dev_df.iterrows():
-        qrels[str(row["query_id"])] = {str(docid): 0 for docid in all_docids}
+        # qrels[str(row["query_id"])] = {str(docid): 0 for docid in all_docids}
+        qrels[str(row["query_id"])] = {}
         qrels[str(row["query_id"])][str(row["doc_id"])] = 1
     
     evaluator = pytrec_eval.RelevanceEvaluator(qrels, metrics)

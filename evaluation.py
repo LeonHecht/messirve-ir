@@ -4,6 +4,7 @@ from models import model_setup
 from datasets import load_dataset
 import pandas as pd
 import pickle
+import json
 import os
 from sentence_transformers import SentenceTransformer
 import torch
@@ -26,7 +27,7 @@ from utils.train_utils import (
     get_msmarco_passages
 )
 # make only GPU0 visible
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 from config import STORAGE_DIR
 
@@ -62,7 +63,7 @@ def run(model, metrics, model_instance=None, tokenizer=None, reranker_model=None
             dtype={"query_id": int, "iteration": int, "doc_id": int, "relevance": int}
         )
 
-        # filter qrels to only include doc_ids that are in the top 10_000 docs
+        # filter qrels to only include doc_ids that are in the top limit docs
         qrels_dev_df = qrels_dev_df[qrels_dev_df["doc_id"].isin(doc_ids)]
 
         # save qrels_dev_df to tsv file
@@ -71,7 +72,13 @@ def run(model, metrics, model_instance=None, tokenizer=None, reranker_model=None
 
         query_ids = qrels_dev_df["query_id"].unique()
         queries = [qid_to_query[qid] for qid in query_ids]
-        rel_doc_ids = qrels_dev_df["doc_id"].unique()
+
+        # qid_to_query_226 = {str(qid): qid_to_query[qid] for qid in query_ids}
+        # with open('qid_to_query_226.json', 'w', encoding='utf-8') as f:
+        #     json.dump(qid_to_query_226, f, indent=4, ensure_ascii=False)
+
+        # print("Number of queries:", len(queries))
+        # rel_doc_ids = qrels_dev_df["doc_id"].unique()
     else:
         docs, queries, doc_ids, query_ids = get_messirve_corpus(country)
     print("Data prepared.")
@@ -193,19 +200,33 @@ def run(model, metrics, model_instance=None, tokenizer=None, reranker_model=None
 
 def main():
     from unsloth import FastLanguageModel
-    # from transformers import AutoModelForCausalLM
+    from peft import AutoPeftModelForCausalLM
+    
+    model_save_path = "/media/discoexterno/leon/ms_marco_passage/results/IR_unsloth_qwen0.5_5negs_rslora_25k_SFT_test/saved_model"
+
     model, tokenizer = FastLanguageModel.from_pretrained(
-        "/media/discoexterno/leon/ms_marco_passage/results/results_IR_ms_marco_full/checkpoint-3600",
-        max_seq_length = 256,
+        model_save_path,
+        max_seq_length = 150,
         dtype = "bf16",
         load_in_4bit = False
     )
-    # model = AutoModelForCausalLM.from_pretrained(
-    #     "/media/discoexterno/leon/ms_marco_passage/results/results_IR_ms_marco_test/checkpoint-1406",
+
+    FastLanguageModel.for_inference(model)
+
+    print(tokenizer.pad_token_id)   # 128004
+    print(tokenizer.pad_token)      # <|finetune_right_pad_id|>
+
+    # model = AutoPeftModelForCausalLM.from_pretrained(
+    #     model_save_path,
     #     torch_dtype=torch.bfloat16
     # )
-    # tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-    run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, model_instance=model, tokenizer=tokenizer, ds="msmarco", reuse_run=False)
+    # tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+    # # tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
+    # if tokenizer.pad_token_id != tokenizer_unsloth.pad_token_id:
+    #     tokenizer.add_special_tokens({"pad_token": tokenizer_unsloth.pad_token})
+    #     tokenizer.pad_token_id = tokenizer_unsloth.pad_token_id
+    #     model.resize_token_embeddings(len(tokenizer))
+    run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, ds="msmarco", model_instance=model, tokenizer=tokenizer, reuse_run=False)
 
 
 if __name__ == "__main__":
