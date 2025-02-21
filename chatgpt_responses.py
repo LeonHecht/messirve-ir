@@ -72,5 +72,5 @@ def process_response_file(in_path, out_path):
 
 
 if __name__ == "__main__":
-    process_response_file('batch_output_228.jsonl', 'qid_to_response_228.json')
+    process_response_file('batch_228_output.jsonl', 'qid_to_response_228.json')
     # create_jsonl_file()

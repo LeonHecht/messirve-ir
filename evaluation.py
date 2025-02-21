@@ -70,8 +70,14 @@ def run(model, metrics, model_instance=None, tokenizer=None, reranker_model=None
         path_to_reference = f"qrels_dev_{limit}.tsv"
         qrels_dev_df.to_csv(path_to_reference, sep="\t", index=False, header=False)
 
-        query_ids = qrels_dev_df["query_id"].unique()
-        queries = [qid_to_query[qid] for qid in query_ids]
+        with open('qid_to_response_228.json', 'r', encoding='utf-8') as f:
+            qid_to_response = json.load(f)
+        
+        query_ids = list(qid_to_response.keys())
+        queries = list(qid_to_response.values())
+
+        # query_ids = qrels_dev_df["query_id"].unique()
+        # queries = [qid_to_query[qid] for qid in query_ids]
 
         # qid_to_query_226 = {str(qid): qid_to_query[qid] for qid in query_ids}
         # with open('qid_to_query_226.json', 'w', encoding='utf-8') as f:
