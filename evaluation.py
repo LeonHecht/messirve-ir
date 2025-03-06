@@ -13,13 +13,16 @@ import msmarco_eval_ranking
 from utils.retrieval_utils import (
     embed_bge,
     embed_jinja,
+    embed_jina_faiss,
     embed_mamba,
     retrieve_bm25,
     embed_s_transformers,
     rerank_cross_encoder,
     embed_qwen,
     get_eval_metrics,
-    create_results_file
+    create_results_file,
+    get_legal_dataset,
+    get_legal_queries,
 )
 
 from utils.train_utils import (
@@ -43,16 +46,18 @@ def get_messirve_corpus(country):
     return docs, queries, doc_ids, query_ids
 
 
-def run(model, metrics, model_instance=None, tokenizer=None, reranker_model=None, reuse_run=False, rerank=False, ds="msmarco", country=None):
+def run(model, metrics, model_instance=None, tokenizer=None, reranker_model=None, reuse_run=False, rerank=False, ds="msmarco", country=None, limit=None):
     print("Starting Evaluation")
     if ds == "msmarco":
         qid_to_query = get_msmarco_queries()
         pid_to_passage = get_msmarco_passages()
 
-        limit = 100_000
-        
-        docs = list(pid_to_passage.values())[:limit]
-        doc_ids = list(pid_to_passage.keys())[:limit]
+        if limit:
+            docs = list(pid_to_passage.values())[:limit]
+            doc_ids = list(pid_to_passage.keys())[:limit]
+        else:
+            docs = list(pid_to_passage.values())
+            doc_ids = list(pid_to_passage.keys())
         
         qrels_dev_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", "qrels.dev.tsv")
         qrels_dev_df = pd.read_csv(
@@ -67,26 +72,44 @@ def run(model, metrics, model_instance=None, tokenizer=None, reranker_model=None
         qrels_dev_df = qrels_dev_df[qrels_dev_df["doc_id"].isin(doc_ids)]
 
         # save qrels_dev_df to tsv file
-        path_to_reference = f"qrels_dev_{limit}.tsv"
+        path_to_reference = f"qrels_dev_full.tsv"
         qrels_dev_df.to_csv(path_to_reference, sep="\t", index=False, header=False)
 
-        with open('qid_to_response_228.json', 'r', encoding='utf-8') as f:
-            qid_to_response = json.load(f)
+        # with open('qid_to_response_228.json', 'r', encoding='utf-8') as f:
+        #     qid_to_response = json.load(f)
         
-        query_ids = list(qid_to_response.keys())
-        queries = list(qid_to_response.values())
+        # query_ids = list(qid_to_response.keys())
+        # queries = list(qid_to_response.values())
 
-        # query_ids = qrels_dev_df["query_id"].unique()
-        # queries = [qid_to_query[qid] for qid in query_ids]
+        query_ids = qrels_dev_df["query_id"].unique()
+        queries = [qid_to_query[qid] for qid in query_ids]
 
         # qid_to_query_226 = {str(qid): qid_to_query[qid] for qid in query_ids}
         # with open('qid_to_query_226.json', 'w', encoding='utf-8') as f:
         #     json.dump(qid_to_query_226, f, indent=4, ensure_ascii=False)
 
-        # print("Number of queries:", len(queries))
+        print("Number of queries:", len(queries))
+        print("Number of docs:", len(docs))
         # rel_doc_ids = qrels_dev_df["doc_id"].unique()
-    else:
+    elif ds == "messirve":
         docs, queries, doc_ids, query_ids = get_messirve_corpus(country)
+    elif ds == "legal":
+        doc_ids, docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus_py.csv"))
+        query_ids, queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "queries_57.csv"))
+
+        qrels_dev_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qrels_py.tsv")
+        qrels_dev_df = pd.read_csv(
+            qrels_dev_path,
+            sep="\t",                # TREC qrels are usually tab-separated
+            names=["query_id", "iteration", "doc_id", "relevance"],
+            header=None,            # There's no header in qrels files
+            dtype={"query_id": int, "iteration": int, "doc_id": int, "relevance": int}
+        )
+        
+        # save qrels_dev_df to tsv file
+        path_to_reference = os.path.join(STORAGE_DIR, "legal_ir", "data", "qrels_py.tsv")
+    else:
+        raise ValueError("Dataset not supported.")
     print("Data prepared.")
 
     # # read corpus from pickle file
@@ -131,6 +154,7 @@ def run(model, metrics, model_instance=None, tokenizer=None, reranker_model=None
         if not os.path.exists(run_path) or not reuse_run:
             model = get_jinja_model()
             model.to(device)
+            # run = embed_jina_faiss(model, docs, queries, doc_ids, query_ids)
             run = embed_jinja(model, docs, queries, doc_ids, query_ids)
             # save run to disk using pickle
             with open(run_path, "wb") as f:
@@ -208,11 +232,12 @@ def main():
     from unsloth import FastLanguageModel
     from peft import AutoPeftModelForCausalLM
     
-    model_save_path = "/media/discoexterno/leon/ms_marco_passage/results/IR_unsloth_qwen0.5_5negs_rslora_25k_SFT_test/saved_model"
+    model_save_path = "/media/discoexterno/leon/legal_ir/results/test_py/saved_model"
 
     model, tokenizer = FastLanguageModel.from_pretrained(
+        # model_save_path,
         model_save_path,
-        max_seq_length = 150,
+        max_seq_length = 1024,
         dtype = "bf16",
         load_in_4bit = False
     )
@@ -232,7 +257,7 @@ def main():
     #     tokenizer.add_special_tokens({"pad_token": tokenizer_unsloth.pad_token})
     #     tokenizer.pad_token_id = tokenizer_unsloth.pad_token_id
     #     model.resize_token_embeddings(len(tokenizer))
-    run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, ds="msmarco", model_instance=model, tokenizer=tokenizer, reuse_run=False)
+    run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, ds="legal", model_instance=model, tokenizer=tokenizer, reuse_run=False)
 
 
 if __name__ == "__main__":
@@ -242,8 +267,8 @@ if __name__ == "__main__":
     # tokenizer = AutoTokenizer.from_pretrained("FacebookAI/xlm-roberta-base")
     # run(model="sentence-transformer", model_instance=model, metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False, rerank=False)
     # run(model="bge-finetuned", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar")
-    # run(model="jinja", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, reuse_run=False, ds="msmarco")
+    # run(model="bge", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, reuse_run=False, ds="legal")
     # run(model="mamba", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
     # run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", model_instance=model, reuse_run=False)
-    # run("bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False)
+    # run("bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, ds="legal", reuse_run=False)
     main()
