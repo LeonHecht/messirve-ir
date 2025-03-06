@@ -6,7 +6,7 @@ import pytrec_eval
 from .train_utils import tokenize_with_manual_eos, get_eos_embeddings
 from config import MAX_QUERY_LEN, MAX_DOC_LEN
 import torch.nn.functional as F
-# import faiss
+import faiss
 import pandas as pd
 
 
@@ -64,34 +64,16 @@ def search_faiss_index(index, query_embeddings, top_k, use_cosine=False):
 
 def batch_encode_jina(model, data, batch_size, task, max_length):
     """
-    Encode data in batches using the provided model.
-
-    Parameters
-    ----------
-    model : object
-        The Jinja embeddings model.
-    data : list or dict
-        Data to be encoded. If a dict, the values will be used.
-    batch_size : int
-        Number of items to encode per batch.
-    task : str
-        Task identifier for the encoding (e.g., 'retrieval.query' or 'retrieval.passage').
-    max_length : int
-        Maximum token length for the encoding.
-
-    Returns
-    -------
-    list
-        A list of embeddings corresponding to the input data.
+    Encode data in batches using the provided Jina model.
+    Returns a list of all embeddings (on CPU).
     """
-    # If data is a dict, convert to list of values.
-    if isinstance(data, dict):
-        data = list(data.values())
+    from tqdm import trange
 
     embeddings = []
-    for i in tqdm(range(0, len(data), batch_size), desc="Batch encoding data"):
-        batch = data[i : i + batch_size]
+    for start_idx in trange(0, len(data), batch_size, desc="Batch encoding data"):
+        batch = data[start_idx : start_idx + batch_size]
         batch_embeddings = model.encode(batch, task=task, max_length=max_length)
+        batch_embeddings = np.array(batch_embeddings, dtype=np.float32)
         embeddings.extend(batch_embeddings)
     return embeddings
 
@@ -211,16 +193,24 @@ def compute_similarity_streaming(doc_embeddings_iterator, embeddings_queries,
     return top_doc_ids, top_scores
 
 
-def embed_jina_faiss(model, docs, queries, doc_ids, query_ids, top_k=1000, sim_type='dot'):
+def embed_jina_faiss(
+    model,
+    docs,
+    queries,
+    doc_ids,
+    query_ids,
+    top_k=1000,
+    sim_type="dot"
+):
     """
-    Embed queries and documents using the Jinja embeddings model, build a FAISS index
-    for the document embeddings in a streaming fashion, and retrieve the top-k most similar
-    documents for each query.
+    Embed queries and documents using the Jina embeddings model, build a FAISS index
+    for document embeddings on CPU in a streaming fashion, and retrieve the top-k most
+    similar documents for each query.
 
     Parameters
     ----------
     model : object
-        The Jinja embeddings model.
+        The Jina embeddings model.
     docs : list
         List of document texts.
     queries : list
@@ -230,92 +220,78 @@ def embed_jina_faiss(model, docs, queries, doc_ids, query_ids, top_k=1000, sim_t
     query_ids : list
         List of query IDs.
     top_k : int, optional
-        Number of top similar documents to retrieve for each query (default is 10).
+        Number of top similar documents to retrieve for each query (default is 1000).
     sim_type : str, optional
-        Similarity type: 'dot' for dot product or 'cosine' for cosine similarity (default is 'dot').
+        Similarity type: 'dot' for dot product or 'cosine' for cosine similarity
+        (default is 'dot').
 
     Returns
     -------
     dict
         Run dictionary mapping each query ID to a dictionary of document IDs and similarity scores.
     """
-    # 1) Encode Queries (Fits in Memory)
-    print("Encoding queries...", end="")
+    # 1) Encode Queries in Memory
+    print("Encoding queries...")
     embeddings_queries = batch_encode_jina(
         model, queries, batch_size=128, task="retrieval.query", max_length=MAX_QUERY_LEN
     )
-    embeddings_queries = torch.tensor(np.array(embeddings_queries), dtype=torch.float32)
-    print("Done.")
+    # Convert to CPU tensor (float32)
+    embeddings_queries = torch.tensor(np.array(embeddings_queries), dtype=torch.float32, device="cpu")
+    print("Done encoding queries.")
 
-    # 2) Create a CPU index as a placeholder, then transfer to GPU
-    print("Initializing GPU index...", end="")
-    # We'll use inner product (dot product) as the metric.
-    # If you want L2 distance or something else, choose a different index type.
-    emb_dim = None  # We'll figure this out after we get the first batch of doc embeddings
-    cpu_index = None
-    gpu_res = faiss.StandardGpuResources()  # Manages GPU resources
-    gpu_index = None
-    print("Done.")
+    # 2) Prepare for streaming document embeddings
+    print("Initializing FAISS CPU index for doc embeddings...")
+    emb_dim = None
+    cpu_index = None  # Will initialize once we know the embedding dimension
+    all_doc_ids = []
 
-    # 3) Stream Document Embeddings and Add Them to the GPU Index
-    print("Building FAISS index from document embeddings (streaming)...", end="")
+    # 3) Stream Document Embeddings and Add to the CPU Index
     doc_iter = batch_encode_jina_stream(
-        model, data=docs, ids=doc_ids, batch_size=128,
+        model, data=docs, ids=doc_ids, batch_size=512,
         task="retrieval.passage", max_length=MAX_DOC_LEN
     )
 
-    all_doc_ids = []
     first_batch = True
-
     for batch_embeddings, batch_ids in doc_iter:
-        # Convert to NumPy
-        batch_embeddings_np = batch_embeddings.cpu().numpy().astype(np.float32)
+        # batch_embeddings is already a float32 torch.Tensor on CPU
+        batch_embeddings_np = batch_embeddings.numpy()
 
-        # If using cosine similarity, normalize each batch
-        if sim_type == 'cosine':
+        # If using cosine similarity, L2-normalize before indexing
+        if sim_type == "cosine":
             faiss.normalize_L2(batch_embeddings_np)
 
-        # Initialize the index on the very first batch
         if first_batch:
-            print("Processing first batch...")
+            # Figure out embedding dimension from first batch
             emb_dim = batch_embeddings_np.shape[1]
-            # Create a CPU index for dot product
+            # Create a CPU index for IP
             cpu_index = faiss.IndexFlatIP(emb_dim)
-            # Transfer CPU index to GPU
-            print("About to transfer index to GPU...")
-            gpu_index = faiss.index_cpu_to_gpu(gpu_res, 0, cpu_index)
-            print("Done.")
             first_batch = False
 
-        print(f"Adding batch of {batch_embeddings_np.shape[0]} documents to the index...")
-        # Add the batch to the GPU index
-        gpu_index.add(batch_embeddings_np)
-        print("Done")
+        # Add to the CPU index
+        cpu_index.add(batch_embeddings_np)
 
-        # Keep track of the doc IDs in the order they're added
+        # Keep track of doc IDs in the order they were added
         all_doc_ids.extend(batch_ids)
-    print("Done.")
 
-    # 4) Search the GPU Index with Query Embeddings
-    print("Searching FAISS index for similar documents...", end="")
-    query_embeddings_np = embeddings_queries.cpu().numpy().astype(np.float32)
+    print("Done building CPU index.")
 
-    if sim_type == 'cosine':
+    # 4) Convert queries to numpy for FAISS search
+    query_embeddings_np = embeddings_queries.numpy()
+    if sim_type == "cosine":
         faiss.normalize_L2(query_embeddings_np)
 
-    distances, faiss_indices = gpu_index.search(query_embeddings_np, top_k)
-    print("Done.")
+    print(f"Searching FAISS index for top {top_k} docs per query...")
+    distances, faiss_indices = cpu_index.search(query_embeddings_np, top_k)
+    print("FAISS search complete.")
 
-    # 5) Build Run Dictionary: query_id -> {doc_id: similarity}
+    # 5) Build Run Dictionary
     run = {}
     for i, qid in enumerate(query_ids):
-        # For each query, we have top_k FAISS indices
-        # Map each index back to the original doc_id
         run[str(qid)] = {}
         for rank in range(top_k):
             doc_idx = faiss_indices[i, rank]
             if doc_idx < 0 or doc_idx >= len(all_doc_ids):
-                continue  # This can happen if FAISS returns -1 for empty index, etc.
+                continue
             doc_id = all_doc_ids[doc_idx]
             score = distances[i, rank]
             run[str(qid)][str(doc_id)] = float(score)
@@ -362,88 +338,41 @@ def embed_jinja(model, docs, queries, doc_ids, query_ids):
 
 def batch_encode_jina_stream(model, data, ids, batch_size, task, max_length):
     """
-    Generator that yields embeddings in batches.
+    Generator that encodes data in batches using the provided Jina model,
+    yielding (embeddings, ids) on each iteration.
 
     Parameters
     ----------
     model : object
-        The Jinja embeddings model.
+        The Jina embeddings model.
     data : list
-        Data to be encoded.
+        List of texts to be encoded.
+    ids : list
+        List of IDs, same length as data.
     batch_size : int
         Number of items to encode per batch.
     task : str
-        Task identifier for the encoding.
+        Task identifier for the encoding (e.g., 'retrieval.passage').
     max_length : int
         Maximum token length for the encoding.
-    ids : list, optional
-        List of IDs corresponding to the data. If provided, these will be used
-        instead of auto-generated indices.
 
     Yields
     ------
-    tuple of (torch.Tensor, list)
-        A tuple containing a tensor of embeddings for the current batch and the
-        corresponding IDs.
+    (torch.Tensor, list)
+        A tuple with (embeddings for the batch, IDs for that batch).
     """
-    for i in tqdm(range(0, len(data), batch_size), desc="Batch encoding data", total=len(data)//batch_size):
-        batch = data[i: i + batch_size]
-        print(f"Processing batch {i//batch_size}: {len(batch)} documents")
+    from tqdm import trange
+
+    n = len(data)
+    for start_idx in trange(0, n, batch_size, desc="Batch streaming data"):
+        end_idx = min(start_idx + batch_size, n)
+        batch = data[start_idx:end_idx]
         batch_embeddings = model.encode(batch, task=task, max_length=max_length)
-        print(f"Finished batch {i//batch_size}")
-        batch_embeddings = torch.tensor(np.array(batch_embeddings), dtype=torch.float32)
-        print(f"Converted to tensor")
-        batch_ids = ids[i: i + batch_size]
+        # Convert to CPU float32 tensor
+        batch_embeddings = torch.tensor(np.array(batch_embeddings), dtype=torch.float32, device="cpu")
+
+        batch_ids = ids[start_idx:end_idx]
         yield batch_embeddings, batch_ids
-
-
-def embed_jinja_stream(model, docs, queries, doc_ids, query_ids, top_k=1000, sim_type='dot'):
-    """
-    Embed queries and documents using the Jinja embeddings model and compute similarities
-    in a streaming fashion to avoid loading all document embeddings into memory.
-
-    Parameters
-    ----------
-    model : object
-        The Jinja embeddings model.
-    docs : dict
-        Dictionary mapping document IDs to document text.
-    queries : list
-        List of query texts.
-    doc_ids : list
-        List of document IDs (should match keys of docs).
-    query_ids : list
-        List of query IDs.
-    top_k : int, optional
-        Number of top similar documents to retrieve for each query (default is 10).
-    sim_type : str, optional
-        Type of similarity to compute: 'dot' or 'cosine' (default is 'dot').
-
-    Returns
-    -------
-    dict
-        Run dictionary mapping each query ID to a dictionary of document IDs and similarity scores.
-    """
-    print("Encoding queries...", end="")
-    # Encode all queries (assumed to be small enough to fit into memory)
-    embeddings_queries = batch_encode_jina(model, queries, batch_size=128,
-                                            task="retrieval.query", max_length=MAX_QUERY_LEN)
-    embeddings_queries = torch.tensor(np.array(embeddings_queries), dtype=torch.float32)
-    print("Done.")
-
-    print("Streaming document embeddings...", end="")
-    # Create a streaming generator for document embeddings.
-    doc_embeddings_iterator = batch_encode_jina_stream(model, docs, doc_ids, batch_size=128,
-                                                       task="retrieval.passage", max_length=MAX_DOC_LEN)
-    print("Done.")
-
-    print("Computing similarity in streaming mode...", end="")
-    top_doc_ids, top_scores = compute_similarity_streaming(doc_embeddings_iterator,
-                                                             embeddings_queries, top_k=top_k, sim_type=sim_type)
-    print("Done.")
-
-    run = retrieve(query_ids, top_doc_ids, top_scores)
-    return run
 
 
 def embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run):
@@ -534,6 +463,182 @@ def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
 
     run = compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs)
     return run
+
+
+def embed_qwen_faiss(
+    model,
+    tokenizer,
+    docs,
+    doc_ids,
+    queries,
+    query_ids,
+    top_k=1000,
+    sim_type="dot",
+    max_doc_len=150,
+    max_query_len=20,
+    batch_size=128
+):
+    """
+    Embed queries and docs using Qwen, build a CPU FAISS index for doc embeddings,
+    then retrieve the top_k docs per query.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        The Qwen model in inference mode.
+    tokenizer : PreTrainedTokenizer
+        Tokenizer for Qwen.
+    docs : list of str
+        List of document texts.
+    doc_ids : list
+        List of doc IDs (parallel to docs).
+    queries : list of str
+        List of query texts.
+    query_ids : list
+        List of query IDs.
+    top_k : int
+        Number of docs to retrieve for each query.
+    sim_type : str
+        'dot' or 'cosine' similarity.
+    max_doc_len : int
+        Max token length for documents (including appended EOS).
+    max_query_len : int
+        Max token length for queries (including appended EOS).
+    batch_size : int
+        Batch size for tokenization + embedding.
+
+    Returns
+    -------
+    run : dict
+        TREC-style dictionary: run[qid][doc_id] = similarity_score.
+    """
+    # 1) Embed Queries in Memory
+    print("Embedding queries in memory...")
+    all_query_embeddings = []
+    all_query_ids = []
+
+    # We can re-use the same streaming logic for queries, or just do them in one pass if memory allows.
+    query_generator = batch_embed_qwen_stream(
+        model, tokenizer, queries, query_ids,
+        batch_size=batch_size, max_length=max_query_len
+    )
+
+    for emb, qids in query_generator:
+        all_query_embeddings.append(emb)
+        all_query_ids.extend(qids)
+
+    # Combine into a single tensor
+    query_embeddings = torch.cat(all_query_embeddings, dim=0)  # (num_queries, hidden_dim)
+
+    print("Queries embedded. Building FAISS index for docs...")
+
+    # 2) Initialize the index after we see the first doc-embedding batch dimension
+    cpu_index = None
+    all_docids_ordered = []
+    first_batch = True
+
+    # 3) Stream doc embeddings
+    doc_generator = batch_embed_qwen_stream(
+        model, tokenizer, docs, doc_ids,
+        batch_size=batch_size, max_length=max_doc_len
+    )
+
+    for doc_embeds, dids in doc_generator:
+        doc_embeds_np = doc_embeds.numpy()  # shape (batch_size, hidden_dim)
+
+        # If 'cosine', L2 normalize
+        if sim_type == "cosine":
+            faiss.normalize_L2(doc_embeds_np)
+
+        if first_batch:
+            emb_dim = doc_embeds_np.shape[1]
+            # We set up an IndexFlatIP for dot-product
+            # and let 'cosine' be handled by normalization
+            cpu_index = faiss.IndexFlatIP(emb_dim)
+            first_batch = False
+
+        cpu_index.add(doc_embeds_np)
+        all_docids_ordered.extend(dids)
+
+    # 4) Convert query embeddings to NumPy for searching
+    query_embeds_np = query_embeddings.numpy()
+    if sim_type == "cosine":
+        faiss.normalize_L2(query_embeds_np)
+
+    print(f"Searching for top-{top_k} documents per query...")
+    distances, faiss_indices = cpu_index.search(query_embeds_np, top_k)
+    print("Search complete.")
+
+    # 5) Build run dictionary: run[qid][docid] = float(similarity)
+    run = {}
+    for q_idx, qid in enumerate(all_query_ids):
+        run[str(qid)] = {}
+        for rank in range(top_k):
+            doc_idx = faiss_indices[q_idx, rank]
+            if doc_idx < 0 or doc_idx >= len(all_docids_ordered):
+                continue
+            doc_id = all_docids_ordered[doc_idx]
+            score = distances[q_idx, rank]
+            run[str(qid)][str(doc_id)] = float(score)
+
+    return run
+
+
+from tqdm import trange
+
+def batch_embed_qwen_stream(
+    model,
+    tokenizer,
+    texts,
+    ids,
+    batch_size,
+    max_length
+):
+    """
+    Generator that yields (embeddings, ids) for Qwen in CPU float32 batches.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Qwen model.
+    tokenizer : PreTrainedTokenizer
+        The tokenizer corresponding to the Qwen model.
+    texts : list of str
+        List of texts (queries or documents).
+    ids : list
+        List of corresponding IDs (query_ids or doc_ids).
+    batch_size : int
+        Number of samples per batch.
+    max_length : int
+        Maximum token length for each text in the batch.
+
+    Yields
+    ------
+    tuple of (torch.Tensor, list)
+        A tuple (embeddings of shape (batch_size, hidden_dim), list of IDs).
+    """
+    n = len(texts)
+    for start_idx in trange(0, n, batch_size, desc="Embedding in batches"):
+        end_idx = min(start_idx + batch_size, n)
+        batch_texts = texts[start_idx:end_idx]
+        batch_ids = ids[start_idx:end_idx]
+
+        # Tokenize
+        tokenized = tokenize_with_manual_eos(tokenizer, batch_texts, max_length=max_length)
+        input_ids = torch.tensor(tokenized["input_ids"], dtype=torch.long)
+        attention_mask = torch.tensor(tokenized["attention_mask"], dtype=torch.long)
+
+        # Move to GPU or CPU (depending on your model device)
+        device = next(model.parameters()).device
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
+
+        with torch.no_grad():
+            embeddings = get_eos_embeddings(model, input_ids, attention_mask, tokenizer)
+        # Move embeddings to CPU and float32
+        embeddings = embeddings.cpu().float()
+
+        yield embeddings, batch_ids
 
 
 def embed_mamba(model, tokenizer, docs, queries, doc_ids, query_ids):
@@ -667,7 +772,7 @@ def merge_reranked_into_full_run(full_run, reranked_run):
     return full_run
 
 
-def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs, doc_ids, max_length, batch_size=64):
+def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs, doc_ids, max_length, batch_size=8):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()  # set the model to evaluation mode
@@ -690,7 +795,7 @@ def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs,
         for start_idx in range(0, len(curr_doc_ids), batch_size):
             end_idx = min(start_idx + batch_size, len(curr_doc_ids))
             batch_doc_ids = curr_doc_ids[start_idx:end_idx]
-            batch_docs = [doc_dict[doc_id] for doc_id in batch_doc_ids]
+            batch_docs = [doc_dict[int(doc_id)] for doc_id in batch_doc_ids]
             # Tokenize the current batch; the same query is paired with each document in the batch
             encodings = tokenizer([query_dict[query_id]] * len(batch_docs), batch_docs,
                                   truncation=True, padding=True,

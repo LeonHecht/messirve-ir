@@ -2,8 +2,9 @@ import sys
 print("Executable", sys.executable)
 
 import os
+import config
 
-STORAGE_DIR = os.getenv("STORAGE_DIR")
+STORAGE_DIR = config.STORAGE_DIR
 print(f"STORAGE_DIR: {STORAGE_DIR}")    # STORAGE_DIR: /media/discoexterno/leon/messirve-ir
 
 from datasets import Dataset
@@ -94,29 +95,30 @@ def training_arguments(hyperparameters):
     batch_size = hyperparameters.get("batch_size", 16)
     weight_decay = hyperparameters.get("weight_decay", 0.01)
     learning_rate = hyperparameters.get("learning_rate", 5e-6)
-    warmup_steps = hyperparameters.get("warmup_steps", 1000)
+    warmup_ratio = hyperparameters.get("warmup_ratio", 0.1)
     metric = hyperparameters.get("metric_for_best_model", "f1")
+    output_dir = hyperparameters.get("output_dir", "./results")
 
     print("Training arguments")
     print("Batch size:", batch_size)
     print("Weight decay:", weight_decay)
     print("Learning rate:", learning_rate)
-    print("Warmup steps:", warmup_steps)
+    print("Warmup ratio:", warmup_ratio)
 
     training_args = TrainingArguments(
-    output_dir='./results',
+    output_dir=output_dir,
     num_train_epochs=epochs,
     per_device_train_batch_size=batch_size,
     per_device_eval_batch_size=batch_size,
-    warmup_steps=warmup_steps,
+    warmup_ratio=warmup_ratio,
     weight_decay=weight_decay,
     learning_rate=learning_rate,
     logging_dir='./logs',
-    logging_steps=40,
+    logging_steps=10,
     evaluation_strategy="steps",
-    eval_steps=500,
+    eval_steps=40,
     save_strategy="steps",
-    save_steps=500,
+    save_steps=40,
     save_total_limit=1,  # limit the number of saved checkpoints
     load_best_model_at_end=True,
     metric_for_best_model=metric,
@@ -188,59 +190,66 @@ def run(model_checkpoint, num_labels,
     else:
         pass
         print(classification_report(y_test, test_pred_labels, target_names=['Class 0', 'Class 1', 'Class 2', 'Class 3']))
+    
+    # save model
+    model.save_pretrained(hyperparameters.get("output_dir", "./results"))
+    tokenizer.save_pretrained(hyperparameters.get("output_dir", "./results"))
+    print("Model saved to:", hyperparameters.get("output_dir", "./results"))
     return test_pred_labels
 
 
-def convert_ds(ds, num_negatives):
+def convert_ds(ds):
     # Convert to a dict-of-lists to avoid repeated expensive indexing.
     data = ds.to_dict()
     queries = data["anchor"]
     positives = data["positive"]
-    if num_negatives > 1:
-        negatives_lists = [data[f"negative_{j}"] for j in range(1, num_negatives + 1)]
-    else:
-        negatives_lists = data["negative"]
-
-    return queries, positives, negatives_lists
+    negatives = data["negative_1"]
+    return queries, positives, negatives
 
 
 def prepare_dataset(ds_path):
-    train_ds_path = os.path.join(ds_path, "messirve_train_ar_hard_negatives1_sbert")
-    test_ds_path = os.path.join(ds_path, "messirve_test_ar_hard_negatives1_sbert")
+    # train_ds_path = os.path.join(ds_path, "messirve_train_ar_hard_negatives1_sbert")
+    # test_ds_path = os.path.join(ds_path, "messirve_test_ar_hard_negatives1_sbert")
+    train_ds_path = os.path.join(ds_path, "train_ds_sbert1")
+    test_ds_path = os.path.join(ds_path, "test_ds_sbert1")
 
     train_ds = load_from_disk(train_ds_path)
     test_ds = load_from_disk(test_ds_path)
 
-    num_negatives = 1
-
-    train_queries, pos_train_texts, neg_train_texts = convert_ds(train_ds, num_negatives)
-    test_queries, pos_test_texts, neg_test_texts = convert_ds(test_ds, num_negatives)
+    train_queries, pos_train_texts, neg_train_texts = convert_ds(train_ds)
+    test_queries, pos_test_texts, neg_test_texts = convert_ds(test_ds)
 
     return train_queries, pos_train_texts, neg_train_texts, test_queries, pos_test_texts, neg_test_texts
 
 
 def main():
     # model_checkpoint = "distilbert/distilbert-base-multilingual-cased"
-    model_checkpoint = "FacebookAI/xlm-roberta-base"
+    # model_checkpoint = "FacebookAI/xlm-roberta-base"
+    model_checkpoint = "mrm8488/legal-longformer-base-8192-spanish"
 
-    ds_path = os.path.join(STORAGE_DIR, "datasets")
+    ds_path = os.path.join(STORAGE_DIR, "legal_ir", "data")
     train_queries, pos_train_texts, neg_train_texts, test_queries, pos_test_texts, neg_test_texts = prepare_dataset(ds_path)
 
-    # split the training data into training and validation sets
-    train_queries, val_queries, pos_train_texts, pos_val_texts, neg_train_texts, neg_val_texts = train_test_split(
-        train_queries, pos_train_texts, neg_train_texts, test_size=0.1, random_state=42
-    )
+    # # split the training data into training and validation sets
+    # train_queries, val_queries, pos_train_texts, pos_val_texts, neg_train_texts, neg_val_texts = train_test_split(
+    #     train_queries, pos_train_texts, neg_train_texts, test_size=0.2, random_state=42
+    # )
 
     hyperparameters = {
-        'epochs': 5,
+        'epochs': 7,
         'batch_size': 8,
         'weight_decay': 0.01,
         'learning_rate': 2e-5,
-        'warmup_steps': 1000,
+        'warmup_ratio': 0.1,
         'metric_for_best_model': "f1",
         'early_stopping_patience': 6,
-        'max_length': 512,
+        'max_length': 2048,
+        'output_dir': os.path.join(STORAGE_DIR, "legal_ir", "results", "cross_encoder_2048"),
     }
+
+    val_queries = test_queries
+    pos_val_texts = pos_test_texts
+    neg_val_texts = neg_test_texts
 
     test_pred_labels = run(
         model_checkpoint, 2,

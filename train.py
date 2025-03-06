@@ -203,7 +203,7 @@ def train(cfg: DictConfig):
         save_strategy="steps",
         save_steps=save_steps,
         save_total_limit=1,
-        logging_steps=40,
+        logging_steps=5,
         # run_name="distiluse-base-multilingual-cased-v2-5-HN",  # Will be used in W&B if `wandb` is installed
     )
     logger.info("Training arguments defined")
