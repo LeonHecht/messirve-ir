@@ -1,7 +1,8 @@
 import os
 from datetime import datetime
+import config
 
-STORAGE_DIR = os.getenv("STORAGE_DIR")
+STORAGE_DIR = config.STORAGE_DIR
 
 
 def log_md(exp_dir, exp_id, model_name, dataset_name, loss_name, training_args, gpu_name, training_results, ir_metrics):

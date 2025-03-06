@@ -11,7 +11,8 @@ import os
 # For Miztli cluster: f"/tmpu/helga_g/{os.getenv('USER')}/messirve-ir"
 # For linux server: "/media/discoexterno/leon/messirve-ir"
 
-STORAGE_DIR = os.getenv("STORAGE_DIR")
+STORAGE_DIR = os.getenv("STORAGE_DIR", "/media/discoexterno/leon/")
+STORAGE_DIR = os.path.join(STORAGE_DIR, "legal_ir", "data")
 logger.info(f"STORAGE_DIR: {STORAGE_DIR}")
 # STORAGE_DIR = os.getenv("STORAGE_DIR", "$HOME/tesis/messirve-ir")
 import json
@@ -37,7 +38,7 @@ from omegaconf import DictConfig
 import evaluation
 
 # make only gpu1 visible
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 logger.info("All imports successful")
 
@@ -70,8 +71,10 @@ def get_model(checkpoint):
 
 
 def get_dataset():
-    train_path = os.path.join(STORAGE_DIR, "datasets", "messirve_train_ar_hard_negatives1_sbert")
-    eval_path = os.path.join(STORAGE_DIR, "datasets", "messirve_test_ar_hard_negatives1_sbert")
+    # train_path = os.path.join(STORAGE_DIR, "datasets", "messirve_train_ar_hard_negatives1_sbert")
+    train_path = os.path.join(STORAGE_DIR, "train_ds_sbert")
+    # eval_path = os.path.join(STORAGE_DIR, "datasets", "messirve_test_ar_hard_negatives1_sbert")
+    eval_path = os.path.join(STORAGE_DIR, "test_ds_sbert")
     train_dataset = load_from_disk(train_path)
     eval_dataset = load_from_disk(eval_path)
 
@@ -171,11 +174,12 @@ def train(cfg: DictConfig):
     log_params(cfg, experiment_id)
     
     model = get_model(checkpoint)
+    model.max_seq_length = 2048
     logger.info("Model loaded")
     train_dataset, eval_dataset = get_dataset()
     logger.info("Datasets loaded")
-    # loss = MultipleNegativesRankingLoss(model)
-    loss = TripletLoss(model, triplet_margin=triplet_margin)
+    loss = MultipleNegativesRankingLoss(model)
+    # loss = TripletLoss(model, triplet_margin=triplet_margin)
     logger.info("Loss function defined")
 
     args = SentenceTransformerTrainingArguments(
@@ -183,6 +187,7 @@ def train(cfg: DictConfig):
         output_dir=output_dir,  # Output directory
         # Optional training parameters:
         max_grad_norm=max_grad_norm,  # Clip gradients to prevent exploding gradients
+        gradient_accumulation_steps=4,  # Accumulate gradients before performing an update
         num_train_epochs=num_epochs,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
@@ -203,7 +208,8 @@ def train(cfg: DictConfig):
     )
     logger.info("Training arguments defined")
 
-    dev_evaluator = get_evaluator(eval_dataset, model)
+    # dev_evaluator = get_evaluator(eval_dataset, model)
+    dev_evaluator = None
 
     trainer = get_trainer(model, args, train_dataset, eval_dataset, loss, dev_evaluator)
     
@@ -212,7 +218,7 @@ def train(cfg: DictConfig):
     # Store training results
     training_metrics = extract_training_metrics(output_dir)
 
-    ir_metrics = evaluation.run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", model_instance=model, reuse_run=False)
+    ir_metrics = evaluation.run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, ds="legal", model_instance=model, reuse_run=False)
 
     # # (Optional) Evaluate the trained model on the test set
     # test_evaluator = TripletEvaluator(
@@ -223,7 +229,8 @@ def train(cfg: DictConfig):
     # )
     # test_evaluator(model)
 
-    dataset_name = "messirve_ar_hard_negatives5_sbert"
+    # dataset_name = "messirve_ar_hard_negatives5_sbert"
+    dataset_name = "legal"
     loss_name = "MultipleNegativesRankingLoss"
     hardware = torch.cuda.get_device_name(0)
     model_name = checkpoint.split("/")[-1]

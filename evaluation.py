@@ -223,9 +223,10 @@ def run(model, metrics, model_instance=None, tokenizer=None, reranker_model=None
         run = rerank_cross_encoder(reranker_model, tokenizer, run, 50, queries, query_ids, docs, doc_ids,
                                    max_length=512)
     
-    get_eval_metrics(run, qrels_dev_df, doc_ids, metrics)
+    ir_metrics = get_eval_metrics(run, qrels_dev_df, doc_ids, metrics)
     create_results_file(run)
     msmarco_eval_ranking.main(path_to_reference, "results.txt")
+    return ir_metrics
 
 
 def main():
@@ -263,12 +264,12 @@ def main():
 if __name__ == "__main__":
     # reranker_model = AutoModelForSequenceClassification.from_pretrained("results_cross_encoder_91_f1/checkpoint-11500")
     # model = SentenceTransformer("multirun/2025-01-30/11-45-41/1/finetuned_models/distiluse-base-multilingual-cased-v1-exp_20250130_123521")
-    # model = SentenceTransformer("sentence-transformers/distiluse-base-multilingual-cased-v2")
+    model = SentenceTransformer("sentence-transformers/distiluse-base-multilingual-cased-v1")
     # tokenizer = AutoTokenizer.from_pretrained("FacebookAI/xlm-roberta-base")
     # run(model="sentence-transformer", model_instance=model, metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False, rerank=False)
     # run(model="bge-finetuned", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar")
     # run(model="bge", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, reuse_run=False, ds="legal")
     # run(model="mamba", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
-    # run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", model_instance=model, reuse_run=False)
+    run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, ds="legal", model_instance=model, reuse_run=False)
     # run("bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, ds="legal", reuse_run=False)
-    main()
+    # main()

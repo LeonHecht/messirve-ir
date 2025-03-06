@@ -210,7 +210,7 @@ def train():
 
     batch_size = 2
     gradient_accumulation_steps = 4
-    epochs = 1
+    epochs = 4
 
     # Compute total steps given your dataset and hyperparameters
     total_steps = (len(train_ds) // (batch_size * gradient_accumulation_steps)) * epochs
@@ -231,7 +231,7 @@ def train():
         save_strategy="steps",           # Save model checkpoints at the end of each epoch
         save_steps=eval_steps,                  # Save checkpoints every 500 stepss
         logging_dir="./logs",            # Directory for logs
-        logging_steps=10,                # Log every 10 steps
+        logging_steps=2,                # Log every 10 steps
         save_total_limit=1,              # Save only the last checkpoint
         remove_unused_columns=False,
         warmup_ratio=0.1,
