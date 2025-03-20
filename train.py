@@ -24,6 +24,7 @@ from sentence_transformers import (
     SentenceTransformerTrainer,
     SentenceTransformerTrainingArguments,
     SentenceTransformerModelCardData,
+    util,
 )
 from sentence_transformers.losses import MultipleNegativesRankingLoss
 from sentence_transformers.losses import TripletLoss
@@ -38,7 +39,7 @@ from omegaconf import DictConfig
 import evaluation
 
 # make only gpu1 visible
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 logger.info("All imports successful")
 
@@ -129,7 +130,7 @@ def extract_training_metrics(output_dir):
 
 def log_params(cfg, exp_id):
     logger.info("\n\n---------------------------------------------")
-    logger.info("Starting experiment:", exp_id)
+    logger.info(f"Starting experiment:{exp_id}")
     logger.info("With parameters:")
     logger.info(f"Checkpoint: {cfg.experiment.checkpoint}")
     logger.info(f"Dataset: {cfg.experiment.dataset_name}")
@@ -166,6 +167,9 @@ def train(cfg: DictConfig):
     eval_steps = cfg.experiment.eval_steps
     save_steps = cfg.experiment.save_steps
     triplet_margin = cfg.experiment.triplet_margin
+    scale = cfg.experiment.scale
+    similarity_fct = cfg.experiment.similarity_fct
+    # max_seq_length = cfg.experiment.max_seq_length
 
     experiment_id = f"exp_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     output_dir = os.path.join(experiment_dir, "checkpoints", f"{checkpoint}")
@@ -174,11 +178,17 @@ def train(cfg: DictConfig):
     log_params(cfg, experiment_id)
     
     model = get_model(checkpoint)
-    model.max_seq_length = 2048
+    if "mrm8488" in checkpoint:
+        model.max_seq_length = 2048
     logger.info("Model loaded")
     train_dataset, eval_dataset = get_dataset()
     logger.info("Datasets loaded")
-    loss = MultipleNegativesRankingLoss(model)
+    if similarity_fct == 1:
+        loss = MultipleNegativesRankingLoss(model, scale=scale, similarity_fct=util.dot_score)
+    elif similarity_fct == 2:
+        loss = MultipleNegativesRankingLoss(model, scale=scale, similarity_fct=util.cos_sim)
+    else:
+        raise ValueError(f"Similarity function {similarity_fct} not recognized")
     # loss = TripletLoss(model, triplet_margin=triplet_margin)
     logger.info("Loss function defined")
 

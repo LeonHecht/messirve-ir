@@ -10,6 +10,7 @@ from sentence_transformers import SentenceTransformer
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import msmarco_eval_ranking
+import ir_datasets
 from utils.retrieval_utils import (
     embed_bge,
     embed_jinja,
@@ -17,6 +18,7 @@ from utils.retrieval_utils import (
     embed_mamba,
     retrieve_bm25,
     embed_s_transformers,
+    embed_s_transformers_faiss,
     rerank_cross_encoder,
     embed_qwen,
     get_eval_metrics,
@@ -68,25 +70,32 @@ def run(model, metrics, model_instance=None, tokenizer=None, reranker_model=None
             dtype={"query_id": int, "iteration": int, "doc_id": int, "relevance": int}
         )
 
+        dataset_dev_small = ir_datasets.load("msmarco-passage/dev/small")
+        qids_dev_small = []
+        for qid, query in dataset_dev_small.queries_iter():
+            qids_dev_small.append(int(qid))
+        
+        print("Length of qids_dev_small:", len(qids_dev_small))
+
         # filter qrels to only include doc_ids that are in the top limit docs
+        qrels_dev_df = qrels_dev_df[qrels_dev_df["query_id"].isin(qids_dev_small)]
         qrels_dev_df = qrels_dev_df[qrels_dev_df["doc_id"].isin(doc_ids)]
 
         # save qrels_dev_df to tsv file
         path_to_reference = f"qrels_dev_full.tsv"
         qrels_dev_df.to_csv(path_to_reference, sep="\t", index=False, header=False)
 
-        # with open('qid_to_response_228.json', 'r', encoding='utf-8') as f:
-        #     qid_to_response = json.load(f)
+        with open('gpt_responses_dev_small.json', 'r', encoding='utf-8') as f:
+            qid_to_response = json.load(f)
         
-        # query_ids = list(qid_to_response.keys())
-        # queries = list(qid_to_response.values())
+        # filter qid_to_response to the ones present in qrels_dev_df
+        qid_to_response = {qid: response for qid, response in qid_to_response.items() if int(qid) in qrels_dev_df["query_id"].unique()}
 
-        query_ids = qrels_dev_df["query_id"].unique()
-        queries = [qid_to_query[qid] for qid in query_ids]
+        query_ids = list(qid_to_response.keys())
+        queries = list(qid_to_response.values())
 
-        # qid_to_query_226 = {str(qid): qid_to_query[qid] for qid in query_ids}
-        # with open('qid_to_query_226.json', 'w', encoding='utf-8') as f:
-        #     json.dump(qid_to_query_226, f, indent=4, ensure_ascii=False)
+        # query_ids = qrels_dev_df["query_id"].unique()
+        # queries = [qid_to_query[qid] for qid in query_ids]
 
         print("Number of queries:", len(queries))
         print("Number of docs:", len(docs))
@@ -196,6 +205,7 @@ def run(model, metrics, model_instance=None, tokenizer=None, reranker_model=None
         if not os.path.exists(run_path) or not reuse_run:
             model = model_instance
             run = embed_s_transformers(model, docs, queries, doc_ids, query_ids)
+            # run = embed_s_transformers_faiss(model, docs, doc_ids, queries, query_ids)
             # save run to disk using pickle
             # with open(run_path, "wb") as f:
             #     print("Dumping run to pickle file...")
@@ -266,11 +276,14 @@ if __name__ == "__main__":
     # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_2048")
     # model = SentenceTransformer("multirun/2025-01-30/11-45-41/1/finetuned_models/distiluse-base-multilingual-cased-v1-exp_20250130_123521")
     # model = SentenceTransformer("sentence-transformers/distiluse-base-multilingual-cased-v1")
+    model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    # model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
+    # model = SentenceTransformer("sentence-transformers/all-MiniLM-L12-v2")
     # tokenizer = AutoTokenizer.from_pretrained("FacebookAI/xlm-roberta-base")
     # run(model="sentence-transformer", model_instance=model, metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False, rerank=False)
     # run(model="bge-finetuned", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar")
-    # run(model="jinja", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, reuse_run=False, ds="msmarco")
+    # run(model="jinja", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, reuse_run=False, ds="msmarco", limit=200_000)
     # run(model="mamba", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
-    # run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, ds="legal", model_instance=model, reuse_run=False)
+    run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, ds="msmarco", model_instance=model, reuse_run=False, limit=200_000)
     # run("bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, ds="legal", reuse_run=False, rerank=True, reranker_model=reranker_model, tokenizer=tokenizer)
-    main()
+    # main()

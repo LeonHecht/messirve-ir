@@ -714,6 +714,109 @@ def embed_s_transformers(model, docs, queries, doc_ids, query_ids):
     return retrieve(query_ids, doc_ids, similarity)
 
 
+def embed_s_transformers_faiss(
+    model,
+    docs: list,
+    doc_ids: list,
+    queries: list,
+    query_ids: list,
+    top_k: int = 1000,
+    batch_size: int = 512,
+    similarity: str = "dot",
+):
+    """
+    Embed documents + queries with SentenceTransformers in a streaming fashion,
+    build a FAISS index of doc embeddings, and retrieve top_k results per query.
+
+    Parameters
+    ----------
+    model : SentenceTransformer
+        The SentenceTransformers model for embedding.
+    docs : list of str
+        List of document texts.
+    doc_ids : list
+        List of document IDs, parallel to docs.
+    queries : list of str
+        List of query texts.
+    query_ids : list
+        List of query IDs.
+    top_k : int, optional
+        Number of docs to retrieve per query (default 1000).
+    batch_size : int, optional
+        Batch size for embedding docs (default 512).
+    similarity : str, optional
+        Either "dot" or "cosine". Defaults to "dot".
+
+    Returns
+    -------
+    run : dict
+        A run dict mapping query_id -> {doc_id: score, ...}
+        suitable for TREC-style evaluation (pytrec_eval).
+    """
+    # ---- 1) Embed Queries in memory ----
+    print("Embedding queries in memory...")
+    query_embeddings = model.encode(queries, batch_size=batch_size, convert_to_numpy=True, show_progress_bar=True)
+    query_embeddings = query_embeddings.astype(np.float32)  # FAISS prefers float32
+
+    if similarity == "cosine":
+        # L2-normalize queries to mimic cosine with IndexFlatIP
+        faiss.normalize_L2(query_embeddings)
+
+    print("Finished embedding queries. Now building doc index...")
+
+    # ---- 2) Create a FAISS index in CPU memory ----
+    # For dot product or "IP", we can keep it simple with IndexFlatIP
+    # If you're truly at 8.8M docs, consider IVFPQ or HNSW for memory usage
+    index = None
+    emb_dim = None
+    all_doc_ids = []
+
+    # ---- 2a) Stream doc embeddings in BATCHES ----
+    # We'll embed docs in chunks to avoid OOM
+    num_docs = len(docs)
+    for start_idx in tqdm(range(0, num_docs, batch_size), desc="Indexing docs"):
+        end_idx = min(start_idx + batch_size, num_docs)
+        doc_batch = docs[start_idx:end_idx]
+        doc_id_batch = doc_ids[start_idx:end_idx]
+
+        # Embed the documents
+        doc_embeddings = model.encode(doc_batch, batch_size=batch_size, convert_to_numpy=True, show_progress_bar=False)
+        doc_embeddings = doc_embeddings.astype(np.float32)
+
+        if similarity == "cosine":
+            # L2-normalize doc embeddings if using "cosine"
+            faiss.normalize_L2(doc_embeddings)
+
+        # On first batch, init the index
+        if index is None:
+            emb_dim = doc_embeddings.shape[1]
+            index = faiss.IndexFlatIP(emb_dim)  # Dot-product index
+        # Add embeddings
+        index.add(doc_embeddings)
+        all_doc_ids.extend(doc_id_batch)
+
+    print(f"Done building index with {index.ntotal} documents.")
+
+    # ---- 3) Search for top_k docs per query ----
+    print("Searching index for each query...")
+    distances, faiss_indices = index.search(query_embeddings, top_k)
+    print("Done searching.")
+
+    # ---- 4) Build the run dictionary (for TREC eval) ----
+    run = {}
+    for q_idx, qid in enumerate(query_ids):
+        run[str(qid)] = {}
+        for rank in range(top_k):
+            doc_idx = faiss_indices[q_idx, rank]
+            if doc_idx < 0 or doc_idx >= len(all_doc_ids):
+                continue
+            doc_id = all_doc_ids[doc_idx]
+            score = distances[q_idx, rank]
+            run[str(qid)][str(doc_id)] = float(score)
+
+    return run
+
+
 def retrieve_bm25(docs, queries, doc_ids, query_ids):
     """
     Embed the queries and documents using the BM25 model and compute the similarity between queries and documents.
