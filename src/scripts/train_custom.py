@@ -17,7 +17,7 @@ from utils.train_utils import (
 )
 from peft import LoraConfig, TaskType, get_peft_model
 import pickle
-import evaluation
+import src.evaluation as evaluation
 from datasets import load_dataset
 import sys
 print("Executable", sys.executable)
@@ -27,7 +27,7 @@ import pandas as pd
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import random
 
-from config import MAX_QUERY_LEN, MAX_DOC_LEN, STORAGE_DIR
+from config.config import MAX_QUERY_LEN, MAX_DOC_LEN, STORAGE_DIR
 
 print("Max query len:", MAX_QUERY_LEN)
 print("Max doc len:", MAX_DOC_LEN)

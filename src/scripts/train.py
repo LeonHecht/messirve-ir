@@ -36,7 +36,7 @@ from utils import log_experiment
 import hydra
 from omegaconf import DictConfig
 
-import evaluation
+import src.evaluation as evaluation
 
 # make only gpu1 visible
 # os.environ["CUDA_VISIBLE_DEVICES"] = "1"

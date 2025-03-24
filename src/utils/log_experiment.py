@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-import config
+import config.config as config
 
 STORAGE_DIR = config.STORAGE_DIR
 

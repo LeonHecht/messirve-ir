@@ -2,7 +2,7 @@ import sys
 print("Executable", sys.executable)
 
 import os
-import config
+import config.config as config
 
 STORAGE_DIR = config.STORAGE_DIR
 print(f"STORAGE_DIR: {STORAGE_DIR}")    # STORAGE_DIR: /media/discoexterno/leon/messirve-ir

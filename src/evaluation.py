@@ -9,7 +9,7 @@ import os
 from sentence_transformers import SentenceTransformer
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import msmarco_eval_ranking
+import src.scripts.msmarco_eval_ranking as msmarco_eval_ranking
 import ir_datasets
 from utils.retrieval_utils import (
     embed_bge,
@@ -34,7 +34,7 @@ from utils.train_utils import (
 # make only GPU0 visible
 # os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-from config import STORAGE_DIR
+from config.config import STORAGE_DIR
 
 from models.model_setup import get_bge_m3_model, get_jinja_model
 
@@ -284,6 +284,6 @@ if __name__ == "__main__":
     # run(model="bge-finetuned", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar")
     # run(model="jinja", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, reuse_run=False, ds="msmarco", limit=200_000)
     # run(model="mamba", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
-    run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, ds="msmarco", model_instance=model, reuse_run=False, limit=200_000)
+    run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, ds="legal", model_instance=model, reuse_run=False)
     # run("bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, ds="legal", reuse_run=False, rerank=True, reranker_model=reranker_model, tokenizer=tokenizer)
     # main()

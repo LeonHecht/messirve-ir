@@ -1,10 +1,10 @@
-from config import MAX_QUERY_LEN, MAX_DOC_LEN
+from config.config import MAX_QUERY_LEN, MAX_DOC_LEN
 from tqdm import tqdm
 import os
 import pickle
 from datasets import load_dataset
 import torch
-from config import STORAGE_DIR
+from config.config import STORAGE_DIR
 from torch.nn import functional as F
 
 

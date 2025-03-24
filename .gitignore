@@ -68,3 +68,7 @@ unsloth_compiled_cache/
 *.json
 
 BatchAPI_requests/*
+
+data/processed/
+
+print_project_structure.py

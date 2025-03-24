@@ -4,7 +4,7 @@ from tqdm import tqdm
 import torch
 import pytrec_eval
 from .train_utils import tokenize_with_manual_eos, get_eos_embeddings
-from config import MAX_QUERY_LEN, MAX_DOC_LEN
+from config.config import MAX_QUERY_LEN, MAX_DOC_LEN
 import torch.nn.functional as F
 import faiss
 import pandas as pd
