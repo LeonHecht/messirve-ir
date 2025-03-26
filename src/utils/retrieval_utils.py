@@ -6,8 +6,9 @@ import pytrec_eval
 from .train_utils import tokenize_with_manual_eos, get_eos_embeddings
 from config.config import MAX_QUERY_LEN, MAX_DOC_LEN
 import torch.nn.functional as F
-import faiss
+# import faiss
 import pandas as pd
+import pickle
 
 
 def build_faiss_index(embeddings, use_cosine=False):
@@ -397,9 +398,9 @@ def embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run):
         embeddings_docs = model.encode(docs, batch_size=8, max_length=MAX_DOC_LEN)['dense_vecs']    # takes about 7min
         print("Done.")
         # save embeddings
-        print("Saving embeddings...", end="")
-        np.save(path, embeddings_docs)
-        print("Done.")
+        # print("Saving embeddings...", end="")
+        # np.save(path, embeddings_docs)
+        # print("Done.")
     else:
         # Load embeddings
         embeddings_docs = np.load(path)
@@ -941,6 +942,9 @@ def get_eval_metrics(run, qrels_dev_df, all_docids, metrics):
     results = evaluator.evaluate(run)
     print("Evaluation done.")
 
+    with open("metrics_per_query.pkl", "wb") as f:
+        pickle.dump(results, f)
+
     result_values = list(results.values())
     metric_names = list(result_values[0].keys())      # because some result names change e.g. from ndcg_cut.10 to ndcg_cut_10
     metric_sums = {metric_name: 0 for metric_name in metric_names}
@@ -975,6 +979,40 @@ def create_results_file(run):
         for query_id, doc_dict in run.items():
             for i, (doc_id, similarity) in enumerate(doc_dict.items()):
                 f.write(f"{query_id}\t{doc_id}\t{i+1}\n")
+
+
+def create_predictions_file(run, run_id="my_run"):
+    """
+    Generates a TREC-formatted predictions file from the run dictionary.
+
+    The run dictionary has the following structure:
+        {
+            str(query_id): {str(doc_id): float(score), ...},
+            ...
+        }
+    
+    The TREC format for a result is:
+        <query_id> Q0 <doc_id> <rank> <score> <run_id>
+    
+    Parameters
+    ----------
+    run : dict
+        Dictionary mapping query IDs to dictionaries of document IDs and their scores.
+    run_id : str, optional
+        Identifier for the run (default is "my_run").
+    
+    Returns
+    -------
+    None
+        Writes the results to a file named "predictions.tsv".
+    """
+    with open("predictions.tsv", "w") as f:
+        for query_id, doc_scores in run.items():
+            # Sort documents by score in descending order and take top 10
+            sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:10]
+            for rank, (doc_id, score) in enumerate(sorted_docs, start=1):
+                # Write in TREC format: query_id, Q0, doc_id, rank, score, run_id
+                f.write(f"{query_id}\tQ0\t{doc_id}\t{rank}\t{score:.4f}\t{run_id}\n")
 
 
 def get_legal_dataset(path):

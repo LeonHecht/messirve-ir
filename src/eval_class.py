@@ -22,6 +22,7 @@ from utils.retrieval_utils import (
     create_results_file,
     get_legal_dataset,
     get_legal_queries,
+    create_predictions_file,
 )
 
 from utils.train_utils import (
@@ -143,7 +144,6 @@ class Evaluator:
                 dtype={"query_id": int, "iteration": int, "doc_id": int, "relevance": int}
             )
             
-            # save qrels_dev_df to tsv file
             self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "qrels_py.tsv")
         else:
             raise ValueError("Dataset not supported.")
@@ -182,7 +182,7 @@ class Evaluator:
                 get_bge_m3_model('BAAI/bge-m3'),
                 self.docs, self.queries, self.doc_ids, self.query_ids, self.reuse_run
             ),
-            "jinja": lambda: embed_jina_faiss(
+            "jina": lambda: embed_jinja(
                 get_jinja_model().to(self.device),
                 self.docs, self.queries, self.doc_ids, self.query_ids
             ),
@@ -209,20 +209,21 @@ class Evaluator:
         self._process_run(run_path, model_mapping[self.model_name])
 
     def rerank_run(self):
-        if self.rerank:
-            # for each query rerank the top 1000 docs
-            self.run = rerank_cross_encoder(self.reranker_model, self.tokenizer, self.run, 100, self.queries, self.query_ids, self.docs, self.doc_ids,
-                                    max_length=2048)
+        # for each query rerank the top 1000 docs
+        self.run = rerank_cross_encoder(self.reranker_model, self.tokenizer, self.run, 100, self.queries, self.query_ids, self.docs, self.doc_ids,
+                                max_length=2048)
 
     def get_metrics(self):
         self.metrics = get_eval_metrics(self.run, self.qrels_dev_df, self.doc_ids, self.metric_names)
         create_results_file(self.run)
+        create_predictions_file(self.run)   # create TREC style qrel file (contains same info as results.txt)
         msmarco_eval_ranking.main(self.path_to_reference_qrels, "results.txt")
 
     def evaluate(self):
         self.load_data()
         self.get_run()
-        self.rerank_run()
+        if self.rerank:
+            self.rerank_run()
         self.get_metrics()
 
 
@@ -266,7 +267,7 @@ def main():
     #     model.resize_token_embeddings(len(tokenizer))
     # run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, ds="msmarco", model_instance=model, tokenizer=tokenizer, reuse_run=False)
     evaluator = Evaluator(ds="msmarco",
-                          model_name="qwen",
+                          model_name="jina",
                           metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
                           model_instance=model,
                           tokenizer=tokenizer,
@@ -278,12 +279,12 @@ if __name__ == "__main__":
     # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_2048/checkpoint-320")
     # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_2048")
     # model = SentenceTransformer("multirun/2025-01-30/11-45-41/1/finetuned_models/distiluse-base-multilingual-cased-v1-exp_20250130_123521")
-    model = SentenceTransformer("sentence-transformers/distiluse-base-multilingual-cased-v1")
+    # model = SentenceTransformer("sentence-transformers/distiluse-base-multilingual-cased-v1")
     # model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-    evaluator = Evaluator(ds="messirve",
-                          model_name="sentence-transformer",
+    evaluator = Evaluator(ds="legal",
+                          model_name="jina",
                           metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
-                          model_instance=model
+                        #   model_instance=model
                 )
     evaluator.evaluate()
     # main()
