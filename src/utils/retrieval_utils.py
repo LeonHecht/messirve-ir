@@ -6,7 +6,10 @@ import pytrec_eval
 from .train_utils import tokenize_with_manual_eos, get_eos_embeddings
 from config.config import MAX_QUERY_LEN, MAX_DOC_LEN
 import torch.nn.functional as F
-# import faiss
+try:
+    import faiss
+except ImportError:
+    pass
 import pandas as pd
 import pickle
 
@@ -89,27 +92,32 @@ def retrieve(query_ids, doc_ids, similarity):
     return run
 
 
-def compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs, sim_type='dot'):
+def compute_similarity(embeddings_queries, embeddings_docs, sim_type='dot'):
     """
-    Given a list of queries and documents, and their embeddings, compute the similarity between queries and documents
-    and return the top_k most similar documents for each query.
+    Given query and document embeddings, compute the similarity between queries and documents
+    and return the similarity matrix.
     Dot-product and cosine similarity are supported.
 
-    Args:
-        queries (list): List of queries.
-        docs (list): List of documents.
-        query_ids (list): List of query IDs.
-        doc_ids (list): List of document IDs (Codigos).
-        embeddings_queries (np.ndarray): Embeddings of queries.
-        embeddings_docs (np.ndarray): Embeddings of documents.
-        top_k (int): Number of most similar documents to retrieve.
-        sim_type (str): Type of similarity to use. Options: 'dot', 'cosine'.
-    
-    Returns:
-        dict: Dictionary with query_id as key and a dict of {doc_id: similarity, ...} as value
-        (run format for pytrec_eval library).
+    Parameters
+    ----------
+    embeddings_queries : torch.Tensor
+        Tensor of query embeddings. Can be either 2D [num_queries, emb_dim] or 1D [emb_dim].
+    embeddings_docs : torch.Tensor
+        Tensor of document embeddings of shape [num_docs, emb_dim].
+    sim_type : str, optional
+        Type of similarity to use. Options: 'dot', 'cosine'. (default is 'dot').
+
+    Returns
+    -------
+    torch.Tensor
+        Similarity matrix of shape [num_queries, num_docs].
     """
     print("Computing similarity...", end="")
+
+    # If there is just one query, unsqueeze to make it 2D
+    if embeddings_queries.dim() == 1:
+        embeddings_queries = embeddings_queries.unsqueeze(0)
+
     if sim_type == 'dot':
         similarities = []
         batch_size = 32
@@ -118,16 +126,16 @@ def compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs, 
             similarities.append(sim_batch)
         similarity = torch.cat(similarities, dim=0)
     elif sim_type == 'cosine':
-        # Only use angle between embeddings
+        # Normalize embeddings along the embedding dimension
         embeddings_queries = F.normalize(embeddings_queries, p=2, dim=1)
         embeddings_docs = F.normalize(embeddings_docs, p=2, dim=1)
         similarity = (embeddings_queries @ embeddings_docs.T) * 100
     else:
         raise ValueError(f"Invalid similarity type: {sim_type}")
-    # print("similarity", similarity)   # [[0.6265, 0.3477], [0.3499, 0.678 ]]
+    
     print("Done.")
+    return similarity
 
-    return retrieve(query_ids, doc_ids, similarity)
 
 
 def compute_similarity_streaming(doc_embeddings_iterator, embeddings_queries,
@@ -248,7 +256,7 @@ def embed_jina_faiss(
 
     # 3) Stream Document Embeddings and Add to the CPU Index
     doc_iter = batch_encode_jina_stream(
-        model, data=docs, ids=doc_ids, batch_size=512,
+        model, data=docs, ids=doc_ids, batch_size=128,
         task="retrieval.passage", max_length=MAX_DOC_LEN
     )
 
@@ -300,7 +308,7 @@ def embed_jina_faiss(
     return run
 
 
-def embed_jinja(model, docs, queries, doc_ids, query_ids):
+def embed_jina(model, docs, queries, doc_ids, query_ids):
     """
     Embed the queries and documents using the Jinja embeddings model and compute the similarity between queries and documents.
     Calls the retrieve function.
@@ -333,7 +341,8 @@ def embed_jinja(model, docs, queries, doc_ids, query_ids):
     embeddings_docs = torch.tensor(np.array(embeddings_docs), dtype=torch.float32)
 
     # Compute similarities
-    run = compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs)
+    similarity = compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs)
+    run = retrieve(query_ids, doc_ids, similarity)
     return run
 
 
@@ -406,8 +415,20 @@ def embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run):
         embeddings_docs = np.load(path)
 
     # Compute similarities
-    run = compute_similarity(query_ids, doc_ids, torch.tensor(embeddings_queries, dtype=torch.float32), torch.tensor(embeddings_docs, dtype=torch.float32))
+    similarity = compute_similarity(query_ids, doc_ids, torch.tensor(embeddings_queries, dtype=torch.float32), torch.tensor(embeddings_docs, dtype=torch.float32))
+    run = retrieve(query_ids, doc_ids, similarity)
     return run
+
+
+def get_sim_bge(model, docs, queries):
+    embeddings_queries = model.encode(queries, batch_size=8, max_length=MAX_QUERY_LEN)['dense_vecs']
+    print("Embedding docs...", end="")
+    embeddings_docs = model.encode(docs, batch_size=8, max_length=MAX_DOC_LEN)['dense_vecs']
+    print("Done.")
+    
+    # Compute similarities
+    similarity = compute_similarity(torch.tensor(embeddings_queries, dtype=torch.float32), torch.tensor(embeddings_docs, dtype=torch.float32))
+    return similarity
 
 
 def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
@@ -706,6 +727,104 @@ def embed_mamba(model, tokenizer, docs, queries, doc_ids, query_ids):
 
     run = compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs)
     return run
+
+
+from contextlib import redirect_stdout
+
+def embed_chunkwise_old(model, get_sim_func, docs, queries, doc_ids, query_ids, window_size=256):
+    # Chunk the documents into smaller pieces.
+    docs_chunked = []
+    for doc in docs:
+        doc_words = doc.split(" ")
+        doc_chunked = [" ".join(doc_words[i:i+window_size]) 
+                       for i in range(0, len(doc_words), window_size)]
+        docs_chunked.append(doc_chunked)
+
+    # Calculate the similarity between all queries and each document's chunks in parallel.
+    similarities = []  # will store one similarity vector (one per query) for each document
+    for doc_chunks in tqdm(docs_chunked, desc="Calculating similarities"):
+        # get_sim_func returns a similarity matrix of shape [n_queries, n_chunks]
+        with open(os.devnull, "w") as fnull, redirect_stdout(fnull):
+            sim_matrix = get_sim_func(model, doc_chunks, queries)
+        # For each query, take the maximum similarity over all chunks
+        doc_sims, _ = sim_matrix.max(dim=1)  # shape: [n_queries]
+        similarities.append(doc_sims)
+    
+    # Stack all document similarity vectors to form a [n_queries, n_docs] tensor.
+    similarities = torch.stack(similarities, dim=1)
+    
+    return retrieve(query_ids, doc_ids, similarities)
+
+
+def embed_chunkwise(model, get_sim_func, docs, queries, doc_ids, query_ids, window_size=256):
+    """
+    Chunk documents and compute the similarity between all queries and all doc chunks in one batch.
+    Then, for each document, take the maximum similarity across its chunks.
+    
+    Parameters
+    ----------
+    model : object
+        The model used for encoding.
+    get_sim_func : callable
+        A function that computes similarity given (model, docs, queries) and returns a similarity matrix.
+        In your case, this is get_sim_bge.
+    docs : list of str
+        List of documents.
+    queries : list of str
+        List of queries.
+    doc_ids : list
+        List of document IDs.
+    query_ids : list
+        List of query IDs.
+    window_size : int, optional
+        Number of words per chunk (default is 256).
+    
+    Returns
+    -------
+    dict
+        Retrieval run in the expected format (as returned by the retrieve function).
+    """
+    # Step 1: Chunk each document
+    docs_chunked = []
+    doc_chunk_counts = []  # keep track of the number of chunks per document
+    for doc in docs:
+        doc_words = doc.split(" ")
+        doc_chunks = [" ".join(doc_words[i:i+window_size]) 
+                      for i in range(0, len(doc_words), window_size)]
+        docs_chunked.append(doc_chunks)
+        doc_chunk_counts.append(len(doc_chunks))
+    
+    # Step 2: Flatten all chunks into a single list and note which document each chunk belongs to.
+    flatten_chunks = []
+    for chunks in docs_chunked:
+        flatten_chunks.extend(chunks)
+    
+    # Step 3: Compute similarity between all queries and all document chunks in one call.
+    # sim_all will have shape [num_queries, total_chunks]
+    sim_all = get_sim_func(model, flatten_chunks, queries)
+    
+    # Step 4: For each document, select its corresponding chunk columns and take max over chunks.
+    num_queries = sim_all.shape[0]
+    num_docs = len(docs)
+    sim_matrix = torch.empty((num_queries, num_docs))
+    
+    start_idx = 0
+    for doc_idx, count in enumerate(doc_chunk_counts):
+        # For this document, columns start at start_idx and span 'count' chunks.
+        sim_doc = sim_all[:, start_idx:start_idx+count]  # shape: [num_queries, count]
+        # Maximum similarity for each query for this document.
+        sim_max, _ = sim_doc.max(dim=1)
+        sim_matrix[:, doc_idx] = sim_max
+        start_idx += count
+    
+    return retrieve(query_ids, doc_ids, sim_matrix)
+
+
+def get_sim_sbert(model, docs, queries):
+    embeddings_queries = model.encode(queries)
+    embeddings_docs = model.encode(docs)
+    similarity = model.similarity(embeddings_queries, embeddings_docs)
+    return similarity
 
 
 def embed_s_transformers(model, docs, queries, doc_ids, query_ids):

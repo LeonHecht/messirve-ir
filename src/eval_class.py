@@ -10,7 +10,7 @@ from sentence_transformers import SentenceTransformer
 from config.config import STORAGE_DIR
 from utils.retrieval_utils import (
     embed_bge,
-    embed_jinja,
+    embed_jina,
     embed_jina_faiss,
     embed_mamba,
     retrieve_bm25,
@@ -23,6 +23,8 @@ from utils.retrieval_utils import (
     get_legal_dataset,
     get_legal_queries,
     create_predictions_file,
+    embed_chunkwise,
+    get_sim_bge,
 )
 
 from utils.train_utils import (
@@ -182,7 +184,7 @@ class Evaluator:
                 get_bge_m3_model('BAAI/bge-m3'),
                 self.docs, self.queries, self.doc_ids, self.query_ids, self.reuse_run
             ),
-            "jina": lambda: embed_jinja(
+            "jina": lambda: embed_jina(
                 get_jinja_model().to(self.device),
                 self.docs, self.queries, self.doc_ids, self.query_ids
             ),
@@ -198,7 +200,8 @@ class Evaluator:
             ),
             "qwen": lambda: embed_qwen(
                 self.model_instance, self.tokenizer, self.docs, self.queries, self.doc_ids, self.query_ids
-            )
+            ),
+            "bge-chunkwise": lambda: embed_chunkwise(get_bge_m3_model('BAAI/bge-m3'), get_sim_bge, self.docs, self.queries, self.doc_ids, self.query_ids, window_size=512)
         }
 
         if self.model_name not in model_mapping:
@@ -281,8 +284,10 @@ if __name__ == "__main__":
     # model = SentenceTransformer("multirun/2025-01-30/11-45-41/1/finetuned_models/distiluse-base-multilingual-cased-v1-exp_20250130_123521")
     # model = SentenceTransformer("sentence-transformers/distiluse-base-multilingual-cased-v1")
     # model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    # model = SentenceTransformer("dariolopez/bge-m3-es-legal-tmp-6")
+    # model = SentenceTransformer("Stern5497/sbert-legal-xlm-roberta-base")
     evaluator = Evaluator(ds="legal",
-                          model_name="jina",
+                          model_name="bge-chunkwise",
                           metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
                         #   model_instance=model
                 )
