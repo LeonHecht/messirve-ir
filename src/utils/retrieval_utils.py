@@ -756,18 +756,59 @@ def embed_chunkwise_old(model, get_sim_func, docs, queries, doc_ids, query_ids, 
     return retrieve(query_ids, doc_ids, similarities)
 
 
-def embed_chunkwise(model, get_sim_func, docs, queries, doc_ids, query_ids, window_size=256):
+def chunk_by_paragraphs(doc, window_size=256):
     """
-    Chunk documents and compute the similarity between all queries and all doc chunks in one batch.
-    Then, for each document, take the maximum similarity across its chunks.
-    
+    Chunk a document by paragraphs without splitting inside a paragraph.
+    Paragraphs are defined by two consecutive newlines ("\n\n"). Consecutive paragraphs
+    are merged until adding another paragraph would exceed the window_size in terms of word count.
+
+    Parameters
+    ----------
+    doc : str
+        The document text.
+    window_size : int, optional
+        Maximum number of words allowed per chunk (default is 256).
+
+    Returns
+    -------
+    list of str
+        List of text chunks, each containing one or more complete paragraphs.
+    """
+    # Split document into paragraphs and remove empty ones.
+    paragraphs = [p.strip() for p in doc.split("\n\n") if p.strip()]
+    chunks = []
+    current_chunk = []
+    current_count = 0
+
+    for para in paragraphs:
+        word_count = len(para.split())
+        # If adding this paragraph exceeds the window and we already have a chunk,
+        # flush the current chunk.
+        if current_chunk and (current_count + word_count > window_size):
+            chunks.append(" ".join(current_chunk))
+            current_chunk = [para]
+            current_count = word_count
+        else:
+            current_chunk.append(para)
+            current_count += word_count
+
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+    return chunks
+
+
+def embed_chunkwise(model, get_sim_func, docs, queries, doc_ids, query_ids, chunk_func, window_size=256):
+    """
+    Chunk documents using the provided chunking function and compute the similarity between all queries and 
+    each document's chunks in one batch. Then, for each document, take the maximum similarity across its chunks.
+
     Parameters
     ----------
     model : object
         The model used for encoding.
     get_sim_func : callable
         A function that computes similarity given (model, docs, queries) and returns a similarity matrix.
-        In your case, this is get_sim_bge.
+        In your case, this is something like get_sim_bge.
     docs : list of str
         List of documents.
     queries : list of str
@@ -776,25 +817,25 @@ def embed_chunkwise(model, get_sim_func, docs, queries, doc_ids, query_ids, wind
         List of document IDs.
     query_ids : list
         List of query IDs.
+    chunk_func : callable
+        Function that takes a document (str) and window_size, and returns a list of chunks.
     window_size : int, optional
-        Number of words per chunk (default is 256).
-    
+        Parameter to pass to the chunking function (default is 256).
+
     Returns
     -------
     dict
         Retrieval run in the expected format (as returned by the retrieve function).
     """
-    # Step 1: Chunk each document
+    # Step 1: Chunk each document using the provided chunking function.
     docs_chunked = []
     doc_chunk_counts = []  # keep track of the number of chunks per document
     for doc in docs:
-        doc_words = doc.split(" ")
-        doc_chunks = [" ".join(doc_words[i:i+window_size]) 
-                      for i in range(0, len(doc_words), window_size)]
-        docs_chunked.append(doc_chunks)
-        doc_chunk_counts.append(len(doc_chunks))
+        chunks = chunk_func(doc, window_size)
+        docs_chunked.append(chunks)
+        doc_chunk_counts.append(len(chunks))
     
-    # Step 2: Flatten all chunks into a single list and note which document each chunk belongs to.
+    # Step 2: Flatten all chunks into a single list.
     flatten_chunks = []
     for chunks in docs_chunked:
         flatten_chunks.extend(chunks)
@@ -810,7 +851,7 @@ def embed_chunkwise(model, get_sim_func, docs, queries, doc_ids, query_ids, wind
     
     start_idx = 0
     for doc_idx, count in enumerate(doc_chunk_counts):
-        # For this document, columns start at start_idx and span 'count' chunks.
+        # For this document, select its corresponding columns.
         sim_doc = sim_all[:, start_idx:start_idx+count]  # shape: [num_queries, count]
         # Maximum similarity for each query for this document.
         sim_max, _ = sim_doc.max(dim=1)

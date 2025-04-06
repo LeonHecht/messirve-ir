@@ -25,6 +25,7 @@ from utils.retrieval_utils import (
     create_predictions_file,
     embed_chunkwise,
     get_sim_bge,
+    chunk_by_paragraphs,
 )
 
 from utils.train_utils import (
@@ -201,7 +202,7 @@ class Evaluator:
             "qwen": lambda: embed_qwen(
                 self.model_instance, self.tokenizer, self.docs, self.queries, self.doc_ids, self.query_ids
             ),
-            "bge-chunkwise": lambda: embed_chunkwise(get_bge_m3_model('BAAI/bge-m3'), get_sim_bge, self.docs, self.queries, self.doc_ids, self.query_ids, window_size=512)
+            "bge-chunkwise": lambda: embed_chunkwise(get_bge_m3_model('BAAI/bge-m3'), get_sim_bge, self.docs, self.queries, self.doc_ids, self.query_ids, chunk_func=chunk_by_paragraphs, window_size=256)
         }
 
         if self.model_name not in model_mapping:
