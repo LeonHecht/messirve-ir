@@ -136,6 +136,7 @@ class Evaluator:
             self.docs, self.queries, self.doc_ids, self.query_ids = get_messirve_corpus("ar")
         elif self.ds == "legal":
             self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus_py.csv"))
+            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "external/BatchAPI_outputs/cleanup/corpus_Gpt4o-mini_cleaned.json"))
             self.query_ids, self.queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "queries_57.csv"))
 
             qrels_dev_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qrels_py.tsv")
@@ -215,7 +216,8 @@ class Evaluator:
     def rerank_run(self):
         # for each query rerank the top 1000 docs
         self.run = rerank_cross_encoder(self.reranker_model, self.tokenizer, self.run, 100, self.queries, self.query_ids, self.docs, self.doc_ids,
-                                max_length=2048)
+                                max_length=512)
+
 
     def get_metrics(self):
         self.metrics = get_eval_metrics(self.run, self.qrels_dev_df, self.doc_ids, self.metric_names)
@@ -287,19 +289,27 @@ if __name__ == "__main__":
     # model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
     # model = SentenceTransformer("dariolopez/bge-m3-es-legal-tmp-6")
     # model = SentenceTransformer("Stern5497/sbert-legal-xlm-roberta-base")
+    
+    # evaluator = Evaluator(ds="legal",
+    #                       model_name="bm25",
+    #                       metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
+    #                     #   model_instance=model
+    #             )
+    # evaluator.evaluate()
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    
+    reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_fine_2048_weighted_GPT_cleaned/checkpoint-440")
+    tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_fine_2048_weighted_GPT_cleaned")
     evaluator = Evaluator(ds="legal",
-                          model_name="bge-chunkwise",
+                          model_name="bm25",
                           metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
-                        #   model_instance=model
+                          model_instance=None,
+                          rerank=True,
+                          tokenizer=tokenizer,
+                          reranker_model=reranker_model
                 )
     evaluator.evaluate()
+
     # main()
     # model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
     # model = SentenceTransformer("sentence-transformers/all-MiniLM-L12-v2")
-    # tokenizer = AutoTokenizer.from_pretrained("FacebookAI/xlm-roberta-base")
-    # run(model="sentence-transformer", model_instance=model, metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar", reuse_run=False, rerank=False)
-    # run(model="bge-finetuned", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, country="ar")
-    # run(model="jinja", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, reuse_run=False, ds="msmarco", limit=200_000)
-    # run(model="mamba", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recip_rank'}, country="ar")
-    # run("sentence-transformer", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, ds="legal", model_instance=model, reuse_run=False)
-    # run("bm25", metrics={'ndcg', 'ndcg_cut.10', 'recall_100', 'recall_10', 'recip_rank'}, ds="legal", reuse_run=False, rerank=True, reranker_model=reranker_model, tokenizer=tokenizer)

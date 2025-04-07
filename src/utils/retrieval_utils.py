@@ -12,6 +12,7 @@ except ImportError:
     pass
 import pandas as pd
 import pickle
+from utils.cross_encoder_scorer import CrossEncoderScorer
 
 
 def build_faiss_index(embeddings, use_cosine=False):
@@ -341,7 +342,7 @@ def embed_jina(model, docs, queries, doc_ids, query_ids):
     embeddings_docs = torch.tensor(np.array(embeddings_docs), dtype=torch.float32)
 
     # Compute similarities
-    similarity = compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs)
+    similarity = compute_similarity(embeddings_queries, embeddings_docs)
     run = retrieve(query_ids, doc_ids, similarity)
     return run
 
@@ -1023,63 +1024,116 @@ def retrieve_bm25(docs, queries, doc_ids, query_ids):
 
 def merge_reranked_into_full_run(full_run, reranked_run):
     """
-    full_run: dict mapping query_id -> {doc_id: original_bi_encoder_score, ...}
-    reranked_run: dict mapping query_id -> {doc_id: cross_encoder_score, ...} for top-k documents
+    Merge a full run (from a bi-encoder) with a reranked run (from a cross-encoder)
+    in such a way that:
+      - The original scores for documents not reranked are preserved.
+      - The top_k documents (i.e. those in reranked_run) are given an offset boost 
+        so that they always remain above non reranked documents.
+    
+    Parameters
+    ----------
+    full_run : dict
+        Dictionary mapping query_id -> {doc_id: original_bi_encoder_score, ...}
+    reranked_run : dict
+        Dictionary mapping query_id -> {doc_id: cross_encoder_score, ...} for the top‑k documents.
+    
+    Returns
+    -------
+    dict
+        A merged run where, for each query, documents in reranked_run have their scores
+        boosted by an offset (set to one more than the maximum original score for that query),
+        ensuring that no document outside top‑k can move into the top‑k positions.
     """
-    for query_id, reranked_docs in reranked_run.items():
-        # Set non re-ranked documents to 0, then update the ones you reranked
-        updated_run = {doc_id: 0 for doc_id in full_run[query_id]}
-        for doc_id, new_score in reranked_docs.items():
-            updated_run[doc_id] = new_score
-        # Optionally, re-sort the dictionary based on scores in descending order:
-        full_run[query_id] = dict(sorted(updated_run.items(), key=lambda x: x[1], reverse=True))
-    return full_run
+    merged_run = {}
+    for query_id, original_scores in full_run.items():
+        # Get the reranked docs (if any) for this query.
+        reranked_docs = reranked_run.get(query_id, {})
+        # Determine the offset: one more than the maximum original score.
+        max_original = max(original_scores.values()) if original_scores else 0
+        offset = max_original + 1
+        updated_run = {}
+        for doc_id, orig_score in original_scores.items():
+            if doc_id in reranked_docs:
+                # For reranked docs, use the cross-encoder score plus offset.
+                updated_run[doc_id] = reranked_docs[doc_id] + offset
+            else:
+                # Otherwise, keep the original score.
+                updated_run[doc_id] = orig_score
+        # Re-sort the updated run in descending order.
+        merged_run[query_id] = dict(sorted(updated_run.items(), key=lambda x: x[1], reverse=True))
+    return merged_run
 
 
 def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs, doc_ids, max_length, batch_size=8):
+    """
+    Rerank the provided run using a cross-encoder scorer. This function creates a 
+    CrossEncoderScorer instance that abstracts the underlying model's scoring mechanism,
+    then processes each query in batches, computing a single relevance score per query–document 
+    pair.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        The trained cross-encoder model.
+    tokenizer : transformers.PreTrainedTokenizer
+        The corresponding tokenizer.
+    run : dict
+        Initial retrieval run, where each query_id maps to a dict of doc_id: score.
+    top_k : int
+        The maximum number of candidate documents to consider per query.
+    queries : list of str
+        List of query texts.
+    query_ids : list
+        List of query identifiers.
+    docs : list of str
+        List of document texts.
+    doc_ids : list
+        List of document identifiers.
+    max_length : int
+        Maximum sequence length for tokenization.
+    batch_size : int, optional
+        Batch size for evaluation (default is 8).
+
+    Returns
+    -------
+    dict
+        A merged run with the reranked scores.
+    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    model.eval()  # set the model to evaluation mode
+    model.eval()
 
+    # Create dictionaries for quick lookup.
     doc_dict = {doc_id: doc for doc_id, doc in zip(doc_ids, docs)}
     query_dict = {str(query_id): query for query_id, query in zip(query_ids, queries)}
 
+    # Limit each query's candidates to top_k.
     reranked_run = {}
-
-    # cut the run to top_k
     for query_id in run:
         reranked_run[query_id] = dict(sorted(run[query_id].items(), key=lambda x: x[1], reverse=True)[:top_k])
 
-    # Loop over each query
+    # Instantiate the scorer.
+    scorer = CrossEncoderScorer(model, tokenizer, head_type="fine_grained")
+
+    # Iterate over each query.
     for query_id, doc_score_dict in tqdm(reranked_run.items(), total=len(reranked_run)):
         curr_doc_ids = list(doc_score_dict.keys())
-        similarity_scores = []
-
-        # Process the docs in batches for the current query
+        scores = []
+        query_text = query_dict[query_id]
+        # Process in batches.
         for start_idx in range(0, len(curr_doc_ids), batch_size):
             end_idx = min(start_idx + batch_size, len(curr_doc_ids))
             batch_doc_ids = curr_doc_ids[start_idx:end_idx]
-            batch_docs = [doc_dict[int(doc_id)] for doc_id in batch_doc_ids]
-            # Tokenize the current batch; the same query is paired with each document in the batch
-            encodings = tokenizer([query_dict[query_id]] * len(batch_docs), batch_docs,
-                                  truncation=True, padding=True,
-                                  max_length=max_length, return_tensors="pt")
-            # Move tensors to the appropriate device
-            for key in encodings:
-                encodings[key] = encodings[key].to(device)
-
-            # Forward pass in inference mode
-            with torch.no_grad():
-                logits = model(**encodings).logits
-
-            # Compute similarity scores (assuming index 1 is the "relevant" class)
-            batch_similarity = torch.nn.functional.softmax(logits, dim=1)[:, 1].cpu().numpy()
-            similarity_scores.extend(batch_similarity)
-
-        # Map each document to its similarity score for this query
-        reranked_run[query_id] = {curr_doc_ids[j]: float(similarity_scores[j]) for j in range(len(curr_doc_ids))}
+            # For each document in the batch, compute the score.
+            for doc_id in batch_doc_ids:
+                doc_text = doc_dict[int(doc_id)]
+                score = scorer.score(query_text, doc_text, max_length=max_length)
+                scores.append(score)
+        # Build a new dict mapping doc_ids to their new scores.
+        reranked_run[query_id] = {curr_doc_ids[i]: float(scores[i]) for i in range(len(curr_doc_ids))}
 
     return merge_reranked_into_full_run(run, reranked_run)
+
 
 
 def get_eval_metrics(run, qrels_dev_df, all_docids, metrics):
@@ -1174,10 +1228,15 @@ def create_predictions_file(run, run_id="my_run"):
                 # Write in TREC format: query_id, Q0, doc_id, rank, score, run_id
                 f.write(f"{query_id}\tQ0\t{doc_id}\t{rank}\t{score:.4f}\t{run_id}\n")
 
-
+import json
 def get_legal_dataset(path):
-    # Load the dataset
-    df = pd.read_csv(path, usecols=["Codigo", "text"])
+    if path.endswith(".json"):
+        with open(path, 'r', encoding='utf-8') as f:
+            corpus_dict = json.load(f)
+        df = pd.DataFrame(list(corpus_dict.items()), columns=["Codigo", "text"])
+    elif path.endswith(".csv"):
+        # Load the dataset
+        df = pd.read_csv(path, usecols=["Codigo", "text"])
     # convert Codigo column to list
     df["Codigo"] = df["Codigo"].astype(int)
     return df["Codigo"].tolist(), df["text"].tolist()

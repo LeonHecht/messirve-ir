@@ -17,6 +17,9 @@ import uuid
 import torch
 import torch.nn as nn
 import pandas as pd
+import json
+from src.eval_class import Evaluator
+
 
 class CrossEncoderTrainer:
     """
@@ -157,11 +160,17 @@ class CrossEncoderTrainer:
         acc = accuracy_score(labels, predictions)
         return {"accuracy": acc, "f1": f1, "precision": precision, "recall": recall}
     
-    def set_dataset_dicts(self):
-        # open corpus_py.csv with pandas
-        corpus = pd.read_csv(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus_py.csv"), usecols=["Codigo", "text"])
+    def set_dataset_dicts(self, corpus_path):
+        if corpus_path.endswith(".csv"):
+            # open corpus_py.csv with pandas
+            corpus = pd.read_csv(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus_py.csv"), usecols=["Codigo", "text"])
 
-        docid_to_text = dict(zip(corpus["Codigo"], corpus["text"]))
+            docid_to_text = dict(zip(corpus["Codigo"], corpus["text"]))
+        elif corpus_path.endswith(".json"):
+            # Load corpus from JSON file.
+            with open(corpus_path, 'r', encoding='utf-8') as f:
+                docid_to_text = json.load(f)
+            
         self.doc_dict = docid_to_text
 
         # open queries_57.csv with pandas
@@ -170,104 +179,54 @@ class CrossEncoderTrainer:
         # create a dictionary with topic_id as key and query as value
         qid_to_query = dict(zip(queries["topic_id"], queries["Query"]))
         self.query_dict = qid_to_query
-        
-    def create_dataset(self, queries, docs, labels, max_length=256):
-        """
-        Tokenize and encode the data and create a Hugging Face Dataset.
-
-        Parameters
-        ----------
-        queries : list of str
-            List of query strings.
-        docs : list of str
-            List of document strings corresponding to the queries.
-        labels : list of int
-            List of integer labels for each query-document pair.
-        max_length : int, optional
-            Maximum tokenization length. Default is 256.
-
-        Returns
-        -------
-        Dataset
-            A Hugging Face Dataset with tokenized inputs and labels.
-        """
-        encodings = self.tokenizer(
-            queries, docs, truncation=True, padding=True, max_length=max_length
-        )
-        encodings["labels"] = labels
-
-        # Shuffle the dataset while preserving alignment.
-        combined = list(
-            zip(encodings["input_ids"], encodings["attention_mask"], encodings["labels"])
-        )
-        random.shuffle(combined)
-        input_ids, attention_mask, labels = zip(*combined)
-
-        return Dataset.from_dict({
-            "input_ids": list(input_ids),
-            "attention_mask": list(attention_mask),
-            "labels": list(labels)
-        })
-
-    def prepare_datasets(self, train_data, val_data, test_data, max_length=256):
-        """
-        Prepare the training, validation, and test datasets.
-
-        Parameters
-        ----------
-        train_data : dict
-            Dictionary with keys 'queries', 'docs', and 'labels' for training.
-        val_data : dict
-            Dictionary with keys 'queries', 'docs', and 'labels' for validation.
-        test_data : dict
-            Dictionary with keys 'queries', 'docs', and 'labels' for testing.
-        max_length : int, optional
-            Maximum tokenization length. Default is 256.
-
-        Returns
-        -------
-        tuple
-            A tuple of (train_dataset, val_dataset, test_dataset).
-        """
-        self.logger.info("Preparing training dataset...")
-        train_dataset = self.create_dataset(
-            train_data["queries"], train_data["docs"], train_data["labels"], max_length
-        )
-        self.logger.info("Preparing validation dataset...")
-        val_dataset = self.create_dataset(
-            val_data["queries"], val_data["docs"], val_data["labels"], max_length
-        )
-        self.logger.info("Preparing test dataset...")
-        test_dataset = self.create_dataset(
-            test_data["queries"], test_data["docs"], test_data["labels"], max_length
-        )
-        return train_dataset, val_dataset, test_dataset
 
     def load_and_split_dataset(self, ds_path, test_size=0.2, val_size=0.1, max_length=None):
         """
-        Load a dataset from Hugging Face Hub, split it into training, validation, and test sets,
-        and tokenize each split using the trainer's tokenizer.
+        Load a dataset from disk that contains only IDs, map these IDs to texts using
+        the trainer's dictionaries, split the dataset into training, validation, and test sets,
+        and tokenize each example.
+
+        The input dataset is expected to have at least the following keys:
+        - "query_id": identifier for the query.
+        - "doc_id": identifier for the document.
+        - "label": the relevance label.
+
+        The function uses `self.query_dict` and `self.doc_dict` to convert IDs to actual texts,
+        tokenizes the (query, doc) pair using the trainer's tokenizer, and attaches the label.
 
         Parameters
         ----------
-        hub_dataset_id : str
-            The hub dataset identifier.
+        ds_path : str
+            The path to the dataset on disk (a Hugging Face Dataset saved via `save_to_disk`).
         test_size : float, optional
-            Fraction of data to be used as test set. Default is 0.2.
+            Fraction of the data to use as the test set (default is 0.2).
         val_size : float, optional
-            Fraction of the training data to be used as validation set. Default is 0.1.
+            Fraction of the training data (after splitting off test) to use as the validation set
+            (default is 0.1).
         max_length : int, optional
-            Maximum sequence length for tokenization. If None, uses hyperparameters value.
+            Maximum sequence length for tokenization. If None, the value from hyperparameters is used.
 
         Returns
         -------
         tuple
-            A tuple of (train_dataset, val_dataset, test_dataset) that are tokenized.
+            A tuple of tokenized Hugging Face Datasets in the order:
+            (train_dataset, validation_dataset, test_dataset).
+            Each dataset contains the following keys:
+            - "input_ids": token IDs for the (query, document) pair.
+            - "attention_mask": attention mask.
+            - "labels": the corresponding relevance label.
         """
         max_length = max_length or self.hyperparameters.get("max_length", 256)
-        # Load dataset from hub; assuming it's pushed as a single split "train"
         ds = load_from_disk(ds_path)
+        
+        # Map IDs to texts using self.query_dict and self.doc_dict
+        def map_ids(example):
+            example["query"] = self.query_dict.get(example["query_id"], "")
+            example["doc"] = self.doc_dict.get(example["doc_id"], "")
+            return example
 
+        ds = ds.map(map_ids)
+        
         # Split into train+val and test
         split_ds = ds.train_test_split(test_size=test_size, shuffle=True, seed=42)
         test_ds = split_ds["test"]
@@ -295,7 +254,7 @@ class CrossEncoderTrainer:
 
         return train_ds, val_ds, test_ds
     
-    def prepare_dataset_from_ids(self, ds_path, test_size=0.2, val_size=0.1, max_length=2048):
+    def prepare_ranknet_ds(self, ds_path, test_size=0.2, val_size=0.1, max_length=2048):
         """
         Prepare the dataset from triplets that contain only query and document IDs.
         It converts IDs to texts using self.query_dict and self.doc_dict, and then tokenizes
@@ -415,12 +374,39 @@ class CrossEncoderTrainer:
             # Define a custom Trainer subclass that overrides compute_loss
             class WeightedLossTrainer(Trainer):
                 def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+                    """
+                    Compute the weighted (or focal) cross-entropy loss, filtering out extra keys from inputs.
+                    
+                    Parameters
+                    ----------
+                    model : torch.nn.Module
+                        The model to train.
+                    inputs : dict
+                        Dictionary containing model inputs. Expected keys include:
+                            - "input_ids", "attention_mask", "labels", etc.
+                        Extra keys such as "query_id", "doc_id", "query", "doc", "pos_doc_id", "neg_doc_id"
+                        are removed here.
+                    return_outputs : bool, optional
+                        If True, returns a tuple (loss, outputs), otherwise returns loss.
+                    **kwargs : dict
+                        Additional keyword arguments.
+                        
+                    Returns
+                    -------
+                    torch.Tensor or (torch.Tensor, dict)
+                        The computed loss, with optional model outputs.
+                    """
+                    # Remove extra keys that the model's forward method does not expect.
+                    for key in ["query_id", "doc_id", "query", "doc"]:
+                        inputs.pop(key, None)
+                    
                     labels = inputs.get("labels")
                     outputs = model(**inputs)
                     logits = outputs.logits
                     num_labels = model.config.num_labels if hasattr(model, "config") else model.module.config.num_labels
                     device = logits.device
                     loss_type = hp.get("loss_type", "weighted")
+                    
                     if loss_type == "focal":
                         focal_gamma = hp.get("focal_gamma", 2.0)
                         # Always use computed class weights as alpha
@@ -437,7 +423,9 @@ class CrossEncoderTrainer:
                         weight = class_weights_tensor.to(device)
                         loss_fct = nn.CrossEntropyLoss(weight=weight)
                         loss = loss_fct(logits.view(-1, num_labels), labels.view(-1))
+                    
                     return (loss, outputs) if return_outputs else loss
+
 
             TrainerClass = WeightedLossTrainer
 
@@ -564,8 +552,8 @@ class CrossEncoderTrainer:
                     score_diff = pos_scores - neg_scores
                     
                     # Get the graded labels and compute the absolute difference
-                    pos_label = inputs["pos_label"].float()
-                    neg_label = inputs["neg_label"].float()
+                    pos_label = pos_label.float()
+                    neg_label = neg_label.float()
                     grade_diff = torch.abs(pos_label - neg_label)
                     
                     # Compute the weighted RankNet loss for each pair
@@ -603,8 +591,8 @@ class CrossEncoderTrainer:
             args=self.training_args,
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
-            # compute_metrics=self.compute_metrics,
-            compute_metrics=self.compute_pairwise_accuracy,
+            compute_metrics=self.compute_metrics,
+            # compute_metrics=self.compute_pairwise_accuracy,
             callbacks=[
                 EarlyStoppingCallback(
                     early_stopping_patience=self.hyperparameters.get("early_stopping_patience", 4)
@@ -711,20 +699,21 @@ def main():
     """
     Main function to load the dataset from the hub, split it, and run training and evaluation.
     """
-    model_checkpoint = "mrm8488/legal-longformer-base-8192-spanish"
+    # model_checkpoint = "mrm8488/legal-longformer-base-8192-spanish"
+    model_checkpoint = "joelniklaus/legal-xlm-roberta-base"
     hyperparameters = {
-        "epochs": 5,
-        "batch_size": 4,
+        "epochs": 14,
+        "batch_size": 8,
         "weight_decay": 0.01,
         "learning_rate": 2e-5,
         "warmup_ratio": 0.1,
-        "metric_for_best_model": "eval_loss",
-        "early_stopping_patience": 5,
+        "metric_for_best_model": "f1",
+        "early_stopping_patience": 6,
         "max_length": 2048,
-        'output_dir': os.path.join(STORAGE_DIR, "legal_ir", "results", "cross_encoder_fine_2048_ranknet"),
-        'gradient_accumulation_steps': 4,
-        "loss_type": "ranknet",   # "weighted" or "focal" or "ranknet" or "graded ranknet"
-        # "focal_gamma": 1.5,
+        'output_dir': os.path.join(STORAGE_DIR, "legal_ir", "results", "cross_encoder_fine_2048_focal_GPT_cleaned"),
+        # 'gradient_accumulation_steps': 4,
+        "loss_type": "focal",   # "weighted" or "focal" or "ranknet" or "graded ranknet"
+        "focal_gamma": 1.0,
     }
     # Set the number of labels; adjust as needed
     num_labels = 4
@@ -732,22 +721,22 @@ def main():
     # Initialize the trainer.
     cross_encoder = CrossEncoderTrainer(model_checkpoint, num_labels, hyperparameters)
 
+    cross_encoder.set_dataset_dicts(corpus_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "external", "BatchAPI_outputs", "cleanup", "corpus_Gpt4o-mini_cleaned.json"))
+
     # Load and split the dataset
     if hyperparameters.get("loss_type") == "focal" or hyperparameters.get("loss_type") == "weighted":
-        ds_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "cross_encoder_ds_finegrained")
+        ds_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", "cross_encoder_ds_finegrained")
         train_ds, val_ds, test_ds = cross_encoder.load_and_split_dataset(
             ds_path, test_size=0.2, val_size=0.1, max_length=hyperparameters["max_length"]
         )
     elif hyperparameters.get("loss_type") == "ranknet":
-        cross_encoder.set_dataset_dicts()
         ds_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "triplet_ds_standard_ranknet")
-        train_ds, val_ds, test_ds = cross_encoder.prepare_dataset_from_ids(
+        train_ds, val_ds, test_ds = cross_encoder.prepare_ranknet_ds(
             ds_path, test_size=0.2, val_size=0.1, max_length=hyperparameters["max_length"]
         )
     elif hyperparameters.get("loss_type") == "graded ranknet":
-        cross_encoder.set_dataset_dicts()
         ds_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "triplet_ds_graded_ranknet")
-        train_ds, val_ds, test_ds = cross_encoder.prepare_dataset_from_ids(
+        train_ds, val_ds, test_ds = cross_encoder.prepare_ranknet_ds(
             ds_path, test_size=0.2, val_size=0.1, max_length=hyperparameters["max_length"]
         )
 
@@ -762,6 +751,18 @@ def main():
 
     # Save the model and tokenizer.
     cross_encoder.save()
+
+    # evaluate IR metrics
+    evaluator = Evaluator(ds="legal",
+                          model_name="bm25",
+                          metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
+                          rerank=True,
+                          reranker_model=cross_encoder.model,
+                          tokenizer=cross_encoder.tokenizer,
+                        #   model_instance=model
+                )
+    evaluator.evaluate()
+
 
     ir_metrics = {
         "ndcg": 0,
