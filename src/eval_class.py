@@ -218,16 +218,70 @@ class Evaluator:
         self.run = rerank_cross_encoder(self.reranker_model, self.tokenizer, self.run, 100, self.queries, self.query_ids, self.docs, self.doc_ids,
                                 max_length=512)
 
-
     def get_metrics(self):
         self.metrics = get_eval_metrics(self.run, self.qrels_dev_df, self.doc_ids, self.metric_names)
         create_results_file(self.run)
         create_predictions_file(self.run)   # create TREC style qrel file (contains same info as results.txt)
         msmarco_eval_ranking.main(self.path_to_reference_qrels, "results.txt")
 
+    def create_run_df(self, run, top_k=5):
+        """
+        Create a DataFrame with queries as columns and rows representing the top_k retrieved documents.
+
+        For each query in the input dictionary, the documents are sorted in descending order
+        according to their scores. Only the top_k document identifiers are kept. In the returned
+        DataFrame, each column corresponds to a query and each row represents the rank (e.g., Rank 1,
+        Rank 2, ..., Rank top_k). If a query has fewer than top_k documents, the missing entries are
+        set to None.
+
+        Parameters
+        ----------
+        run : dict
+            A dictionary where each key is a query identifier and each value is a dictionary of document
+            identifiers mapped to their corresponding scores. Example format:
+            {
+                "query1": {"doc1": score1, "doc2": score2, ...},
+                "query2": {"doc3": score3, "doc4": score4, ...},
+                ...
+            }
+        top_k : int, optional
+            The number of top documents to retrieve for each query (default is 5).
+
+        Returns
+        -------
+        pd.DataFrame
+            A pandas DataFrame with queries as columns and rows representing the top_k document ranks.
+            The index labels (e.g., 'Rank 1', 'Rank 2', etc.) indicate the rank order.
+
+        Raises
+        ------
+        ValueError
+            If the input run is not a dictionary, or if its values are not dictionaries.
+        """
+        if not isinstance(run, dict):
+            raise ValueError("The run input must be a dictionary.")
+        
+        data = {}
+        for query_id, doc_scores in run.items():
+            if not isinstance(doc_scores, dict):
+                raise ValueError("Each value in the run dictionary must be a dictionary of document scores.")
+            # Sort documents for the given query based on their scores (higher first)
+            sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
+            top_docs = [doc for doc, score in sorted_docs[:top_k]]
+            # Pad with None if fewer than top_k documents exist
+            if len(top_docs) < top_k:
+                top_docs.extend([None] * (top_k - len(top_docs)))
+            data[query_id] = top_docs
+
+        # Create DataFrame and label the rows by rank.
+        df = pd.DataFrame(data)
+        df.index = [f"Rank {i + 1}" for i in range(top_k)]
+        return df
+
     def evaluate(self):
         self.load_data()
         self.get_run()
+        # self.run_df = self.create_run_df(self.run, top_k=10)
         if self.rerank:
             self.rerank_run()
         self.get_metrics()
@@ -298,15 +352,15 @@ if __name__ == "__main__":
     # evaluator.evaluate()
     from transformers import AutoTokenizer, AutoModelForSequenceClassification
     
-    reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_fine_2048_weighted_GPT_cleaned/checkpoint-440")
-    tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_fine_2048_weighted_GPT_cleaned")
+    # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_fine_2048_weighted_GPT_cleaned/checkpoint-440")
+    # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_fine_2048_weighted_GPT_cleaned")
     evaluator = Evaluator(ds="legal",
-                          model_name="bm25",
+                          model_name="bge",
                           metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
                           model_instance=None,
-                          rerank=True,
-                          tokenizer=tokenizer,
-                          reranker_model=reranker_model
+                          rerank=False,
+                        #   tokenizer=tokenizer,
+                        #   reranker_model=reranker_model
                 )
     evaluator.evaluate()
 

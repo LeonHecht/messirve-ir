@@ -92,7 +92,6 @@ def retrieve(query_ids, doc_ids, similarity):
     print("Run created.")
     return run
 
-
 def compute_similarity(embeddings_queries, embeddings_docs, sim_type='dot'):
     """
     Given query and document embeddings, compute the similarity between queries and documents
@@ -416,7 +415,7 @@ def embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run):
         embeddings_docs = np.load(path)
 
     # Compute similarities
-    similarity = compute_similarity(query_ids, doc_ids, torch.tensor(embeddings_queries, dtype=torch.float32), torch.tensor(embeddings_docs, dtype=torch.float32))
+    similarity = compute_similarity(torch.tensor(embeddings_queries, dtype=torch.float32), torch.tensor(embeddings_docs, dtype=torch.float32))
     run = retrieve(query_ids, doc_ids, similarity)
     return run
 
