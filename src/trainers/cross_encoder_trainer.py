@@ -2,6 +2,7 @@ import os
 import random
 import logging
 import numpy as np
+import sys
 from datasets import Dataset, load_from_disk
 from transformers import (AutoTokenizer,
                           AutoModelForSequenceClassification,
@@ -76,6 +77,9 @@ class CrossEncoderTrainer:
         TrainingArguments
             The training arguments object.
         """
+        epoch_batches = 2648
+        epoch_steps = epoch_batches // self.hyperparameters["batch_size"]
+
         return TrainingArguments(
             output_dir=self.hyperparameters.get("output_dir", "./results"),
             num_train_epochs=self.hyperparameters.get("epochs", 100),
@@ -87,9 +91,9 @@ class CrossEncoderTrainer:
             logging_dir='./logs',
             logging_steps=10,
             evaluation_strategy="steps",
-            eval_steps=40,
+            eval_steps=epoch_steps//10,
             save_strategy="steps",
-            save_steps=40,
+            save_steps=epoch_steps//10,
             save_total_limit=1,
             load_best_model_at_end=True,
             metric_for_best_model=self.hyperparameters.get("metric_for_best_model", "f1"),
@@ -119,19 +123,16 @@ class CrossEncoderTrainer:
             Dictionary containing 'pairwise_accuracy'.
         """
         preds, labels = eval_pred
-        # Convert preds (tensor or array) to np array
-        if hasattr(preds, "detach"):
-            preds = preds.detach().cpu().numpy()
-        # same for labels
-        if hasattr(labels, "detach"):
-            labels = labels.detach().cpu().numpy()
-        
-        # Our predicted label = 1 if s^+ - s^- > 0
+        # Ensure tensors are detached and moved to CPU before converting to NumPy
+        preds = preds.detach().cpu().numpy() if hasattr(preds, "detach") else preds
+        labels = labels.detach().cpu().numpy() if hasattr(labels, "detach") else labels
+
+        # Predicted label = 1 if s^+ - s^- > 0
         pred_labels = (preds > 0).astype(int)
         correct = (pred_labels == labels).sum()
         total = len(labels)
         pairwise_acc = correct / total if total > 0 else 0.0
-        
+
         return {"pairwise_accuracy": pairwise_acc}
 
     @staticmethod
@@ -278,9 +279,13 @@ class CrossEncoderTrainer:
         """
         # Map IDs to texts.
         def map_ids(example):
+            pos_text = self.doc_dict[str(example["pos_doc_id"])]
+            neg_text = self.doc_dict[str(example["neg_doc_id"])]
+            if pos_text == neg_text:
+                print(f"Identical texts found for query_id {example['query_id']}: pos_doc_id {example['pos_doc_id']} equals neg_doc_id {example['neg_doc_id']}")
             example["query"] = self.query_dict.get(example["query_id"], "")
-            example["pos_doc"] = self.doc_dict.get(example["pos_doc_id"], "")
-            example["neg_doc"] = self.doc_dict.get(example["neg_doc_id"], "")
+            example["pos_doc"] = pos_text
+            example["neg_doc"] = neg_text
             return example
 
         ds = load_from_disk(ds_path)
@@ -463,6 +468,11 @@ class CrossEncoderTrainer:
                     pos_label = inputs.pop("pos_label")
                     neg_label = inputs.pop("neg_label")
 
+                    # Check that positive and negative input_ids are different.
+                    diff_mask = (inputs["input_ids_pos"] != inputs["input_ids_neg"]).any(dim=1)
+                    if not diff_mask.all():
+                        raise ValueError("Some positive and negative input_ids are identical!")
+
                     # 1) Forward pass on positive docs
                     pos_output = model(
                         input_ids=inputs["input_ids_pos"],
@@ -492,21 +502,22 @@ class CrossEncoderTrainer:
                     return ranknet_loss
                 
                 def prediction_step(self, model, inputs, prediction_loss_only=False, ignore_keys=None):
-                    loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
-                    pos_out, neg_out = outputs
-                    
-                    # s^+ - s^- is the "prediction"
-                    score_diff = (pos_out.logits[:,0] - neg_out.logits[:,0]).detach()
-                    
-                    # label is 1 if pos_label > neg_label, else 0
-                    # (If your data always has pos_label > neg_label, you can store 1
-                    # or gather from the batch if needed)
-                    labels = torch.ones_like(score_diff, dtype=torch.int32)
+                    with torch.no_grad():
+                        loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
+                        pos_out, neg_out = outputs
+
+                        # Compute score difference as a tensor.
+                        score_diff_tensor = pos_out.logits[:, 0] - neg_out.logits[:, 0]
+                        # Create labels tensor with the same shape.
+                        labels = torch.ones(score_diff_tensor.shape, dtype=torch.int32, device=score_diff_tensor.device)
                     
                     if prediction_loss_only:
                         return (loss, None, None)
                     
-                    return (loss, score_diff, labels)
+                    # Return tensors directly.
+                    return (loss, score_diff_tensor.detach(), labels)
+
+
             
             TrainerClass = RankNetTrainer
 
@@ -591,8 +602,8 @@ class CrossEncoderTrainer:
             args=self.training_args,
             train_dataset=train_dataset,
             eval_dataset=val_dataset,
-            compute_metrics=self.compute_metrics,
-            # compute_metrics=self.compute_pairwise_accuracy,
+            # compute_metrics=self.compute_metrics,
+            compute_metrics=self.compute_pairwise_accuracy,
             callbacks=[
                 EarlyStoppingCallback(
                     early_stopping_patience=self.hyperparameters.get("early_stopping_patience", 4)
@@ -611,7 +622,7 @@ class CrossEncoderTrainer:
         self.logger.info("Starting training...")
         self.trainer.train()
 
-    def evaluate(self, test_dataset):
+    def evaluate_classification(self, test_dataset):
         """
         Evaluate the model on a test dataset and print a classification report.
 
@@ -632,6 +643,28 @@ class CrossEncoderTrainer:
         report = classification_report(test_dataset["labels"], preds, target_names=target_names)
         print(report)
         return predictions
+
+    def evaluate(self, test_dataset):
+        """
+        Evaluate the model on a test dataset and print evaluation metrics.
+        For a RankNet cross-encoder, we compute pairwise accuracy (the percentage of
+        document pairs in which the positive is scored higher than the negative).
+        
+        Parameters
+        ----------
+        test_dataset : Dataset
+            The test dataset.
+        
+        Returns
+        -------
+        dict
+            Evaluation metrics as returned by the Trainer.
+        """
+        self.logger.info("Evaluating on test dataset...")
+        # Use the Trainer's evaluate, which will call our compute_metrics (e.g. compute_pairwise_accuracy)
+        metrics = self.trainer.evaluate(test_dataset)
+        print("Evaluation metrics:", metrics)
+        return metrics
 
     def predict(self, dataset):
         """
@@ -699,21 +732,21 @@ def main():
     """
     Main function to load the dataset from the hub, split it, and run training and evaluation.
     """
-    # model_checkpoint = "mrm8488/legal-longformer-base-8192-spanish"
-    model_checkpoint = "joelniklaus/legal-xlm-roberta-base"
+    model_checkpoint = "mrm8488/legal-longformer-base-8192-spanish"
+    # model_checkpoint = "joelniklaus/legal-xlm-roberta-base"
     hyperparameters = {
-        "epochs": 14,
-        "batch_size": 8,
+        "epochs": 1,
+        "batch_size": 4,
         "weight_decay": 0.01,
         "learning_rate": 2e-5,
         "warmup_ratio": 0.1,
-        "metric_for_best_model": "f1",
+        "metric_for_best_model": "eval_pairwise_accuracy",
         "early_stopping_patience": 6,
         "max_length": 2048,
-        'output_dir': os.path.join(STORAGE_DIR, "legal_ir", "results", "cross_encoder_fine_2048_focal_GPT_cleaned"),
+        'output_dir': os.path.join(STORAGE_DIR, "legal_ir", "results", "cross_encoder_fine_2048_ranknet_GPT_cleaned"),
         # 'gradient_accumulation_steps': 4,
-        "loss_type": "focal",   # "weighted" or "focal" or "ranknet" or "graded ranknet"
-        "focal_gamma": 1.0,
+        "loss_type": "ranknet",   # "weighted" or "focal" or "ranknet" or "graded ranknet"
+        # "focal_gamma": 1.0,
     }
     # Set the number of labels; adjust as needed
     num_labels = 4
@@ -740,6 +773,9 @@ def main():
             ds_path, test_size=0.2, val_size=0.1, max_length=hyperparameters["max_length"]
         )
 
+    # cut train_ds to limit
+    train_ds = train_ds.select(range(100))
+
     # Setup the trainer with training and validation sets.
     cross_encoder.setup_trainer(train_ds, val_ds)
 
@@ -763,19 +799,20 @@ def main():
                 )
     evaluator.evaluate()
 
-
     ir_metrics = {
-        "ndcg": 0,
-        "ndcg_cut_10": 0,
-        "recall_100": 0,
-        "recall_10": 0,
-        "recip_rank": 0
+        "ndcg": evaluator.metrics["ndcg"],
+        "ndcg_cut_10": evaluator.metrics["ndcg_cut_10"],
+        "recall_1000": evaluator.metrics["recall_1000"],
+        "recall_100": evaluator.metrics["recall_100"],
+        "recall_10": evaluator.metrics["recall_10"],
+        "recip_rank": evaluator.metrics["recip_rank"],
     }
+
     # Replace 'gpu_name' with your actual GPU name if available.
     gpu_name = "RTX A5000"
     exp_id = "exp_" + uuid.uuid4().hex[:8]
     dataset_name = "cross_encoder_ds_finegrained"
-    loss_name = "CrossEntropyLoss"
+    loss_name = hyperparameters.get("loss_type", "")
     cross_encoder.log_experiment(exp_id, dataset_name, loss_name, gpu_name, ir_metrics)
 
 

@@ -8,7 +8,9 @@ from datasets import load_dataset
 import src.scripts.msmarco_eval_ranking as msmarco_eval_ranking
 from sentence_transformers import SentenceTransformer
 from config.config import STORAGE_DIR
-from utils.retrieval_utils import (
+import sys
+
+from src.utils.retrieval_utils import (
     embed_bge,
     embed_jina,
     embed_jina_faiss,
@@ -28,12 +30,12 @@ from utils.retrieval_utils import (
     chunk_by_paragraphs,
 )
 
-from utils.train_utils import (
+from src.utils.train_utils import (
     get_msmarco_queries,
     get_msmarco_passages
 )
 
-from models.model_setup import get_bge_m3_model, get_jinja_model, get_mamba_model
+from src.models.model_setup import get_bge_m3_model, get_jinja_model, get_mamba_model
 
 
 class Evaluator:
@@ -135,7 +137,7 @@ class Evaluator:
         elif self.ds == "messirve":
             self.docs, self.queries, self.doc_ids, self.query_ids = get_messirve_corpus("ar")
         elif self.ds == "legal":
-            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus_py.csv"))
+            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus_py.csv"))
             self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "external/BatchAPI_outputs/cleanup/corpus_Gpt4o-mini_cleaned.json"))
             self.query_ids, self.queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "queries_57.csv"))
 

@@ -95,7 +95,8 @@ def log_csv(exp_id, model_name, dataset_name, loss_name, training_args, gpu_name
     elif "eval_loss" in last_epoch_result:
         csv_row["Final Test Loss"] = last_epoch_result["eval_loss"]
         previous_epoch_result = training_results[-2]
-        csv_row["Final Train Loss"] = previous_epoch_result["loss"]
+        if "loss" in previous_epoch_result:
+            csv_row["Final Train Loss"] = previous_epoch_result["loss"]
     else:
         csv_row["Final Train Loss"] = "N/A"
     

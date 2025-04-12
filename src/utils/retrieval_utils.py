@@ -12,7 +12,7 @@ except ImportError:
     pass
 import pandas as pd
 import pickle
-from utils.cross_encoder_scorer import CrossEncoderScorer
+from src.utils.cross_encoder_scorer import CrossEncoderScorer
 
 
 def build_faiss_index(embeddings, use_cosine=False):
