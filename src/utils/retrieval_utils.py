@@ -1063,6 +1063,7 @@ def merge_reranked_into_full_run(full_run, reranked_run):
     return merged_run
 
 
+import random
 def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs, doc_ids, max_length, batch_size=8):
     """
     Rerank the provided run using a cross-encoder scorer. This function creates a 
@@ -1112,7 +1113,7 @@ def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs,
         reranked_run[query_id] = dict(sorted(run[query_id].items(), key=lambda x: x[1], reverse=True)[:top_k])
 
     # Instantiate the scorer.
-    scorer = CrossEncoderScorer(model, tokenizer, head_type="fine_grained")
+    scorer = CrossEncoderScorer(model, tokenizer, head_type="ranknet")
 
     # Iterate over each query.
     for query_id, doc_score_dict in tqdm(reranked_run.items(), total=len(reranked_run)):
@@ -1127,6 +1128,7 @@ def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs,
             for doc_id in batch_doc_ids:
                 doc_text = doc_dict[int(doc_id)]
                 score = scorer.score(query_text, doc_text, max_length=max_length)
+                # score = random.random()
                 scores.append(score)
         # Build a new dict mapping doc_ids to their new scores.
         reranked_run[query_id] = {curr_doc_ids[i]: float(scores[i]) for i in range(len(curr_doc_ids))}

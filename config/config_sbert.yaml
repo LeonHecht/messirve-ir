@@ -1,0 +1,35 @@
+experiment:
+  # checkpoint: "sentence-transformers/distiluse-base-multilingual-cased-v1"  # Pretrained model checkpoint
+  checkpoint: "mrm8488/legal-longformer-base-8192-spanish"  # Pretrained model checkpoint
+  # checkpoint: "distilbert/distilbert-base-multilingual-cased"  # Pretrained model checkpoint
+  # checkpoint: "jinaai/jina-embeddings-v3"  # Pretrained model checkpoint
+  # checkpoint: "BAAI/bge-m3"  # Pretrained model checkpoint
+  # max_seq_length: 512  # Maximum sequence length
+  dataset_name: "legal"  # Dataset name (used for logging, not loading)
+  loss_name: "MultipleNegativesRankingLoss"  # Loss function name (used for logging)
+  learning_rate: 2e-5  # Initial learning rate
+  batch_size: 2  # Training and evaluation batch size
+  num_epochs: 2  # Total number of training epochs
+  warmup_ratio: 0.2  # Warmup ratio for the learning rate scheduler
+  weight_decay: 0.01  # Weight decay
+  max_grad_norm: 30  # Maximum gradient norm for clipping
+  fp16: False  # Enable mixed precision (FP16) training
+  bf16: False  # Enable BF16 precision training (overrides FP16 if supported)
+  eval_steps: 30  # Perform evaluation every N steps
+  save_steps: 30  # Save the model every N steps
+  scale: 20
+  similarity_fct: 2  # Similarity function for computing the similarity matrix
+  triplet_margin: 5  # Margin for triplet loss
+
+defaults:
+  - _self_
+  - override hydra/launcher: joblib
+
+hydra:
+  launcher:
+    n_jobs: 1
+  sweeper:
+    params:
+      experiment.num_epochs: 3, 5, 10
+      experiment.learning_rate: 5e-6, 5e-5, 5e-4
+      # checkpoint: "sentence-transformers/distiluse-base-multilingual-cased-v1", "mrm8488/legal-longformer-base-8192-spanish"

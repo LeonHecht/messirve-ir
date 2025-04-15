@@ -218,7 +218,7 @@ class Evaluator:
     def rerank_run(self):
         # for each query rerank the top 1000 docs
         self.run = rerank_cross_encoder(self.reranker_model, self.tokenizer, self.run, 100, self.queries, self.query_ids, self.docs, self.doc_ids,
-                                max_length=512)
+                                max_length=2048)
 
     def get_metrics(self):
         self.metrics = get_eval_metrics(self.run, self.qrels_dev_df, self.doc_ids, self.metric_names)
@@ -354,15 +354,15 @@ if __name__ == "__main__":
     # evaluator.evaluate()
     from transformers import AutoTokenizer, AutoModelForSequenceClassification
     
-    # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_fine_2048_weighted_GPT_cleaned/checkpoint-440")
-    # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_fine_2048_weighted_GPT_cleaned")
+    reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_lr_3e-05_graded_ranknet/checkpoint-858")
+    tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_lr_3e-05_graded_ranknet")
     evaluator = Evaluator(ds="legal",
-                          model_name="bge",
+                          model_name="bm25",
                           metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
                           model_instance=None,
-                          rerank=False,
-                        #   tokenizer=tokenizer,
-                        #   reranker_model=reranker_model
+                          rerank=True,
+                          tokenizer=tokenizer,
+                          reranker_model=reranker_model
                 )
     evaluator.evaluate()
 

@@ -20,6 +20,91 @@ import torch.nn as nn
 import pandas as pd
 import json
 from src.eval_class import Evaluator
+# import hydra
+# from omegaconf import DictConfig, OmegaConf
+
+
+class RankNetTrainer(Trainer):
+                """
+                A Trainer subclass that implements the RankNet pairwise loss.
+                """
+
+                def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+                    """
+                    Compute the RankNet pairwise loss.
+
+                    Parameters
+                    ----------
+                    model : torch.nn.Module
+                        The model to train.
+                    inputs : dict
+                        A dictionary containing the batch data. Must include:
+                        - "input_ids_pos": token IDs for the positive docs
+                        - "input_ids_neg": token IDs for the negative docs
+                        - "attention_mask_pos": attention mask for the positive docs
+                        - "attention_mask_neg": attention mask for the negative docs
+                        (Adjust these names as needed if your dataset is organized differently.)
+                    return_outputs : bool
+                        Whether to return (loss, outputs) or just loss.
+                    **kwargs : dict
+                        Additional arguments.
+
+                    Returns
+                    -------
+                    torch.Tensor or (torch.Tensor, dict)
+                        The RankNet loss, with optional model outputs if return_outputs=True.
+                    """
+                    pos_label = inputs.pop("pos_label")
+                    neg_label = inputs.pop("neg_label")
+
+                    # Check that positive and negative input_ids are different.
+                    diff_mask = (inputs["input_ids_pos"] != inputs["input_ids_neg"]).any(dim=1)
+                    if not diff_mask.all():
+                        raise ValueError("Some positive and negative input_ids are identical!")
+
+                    # 1) Forward pass on positive docs
+                    pos_output = model(
+                        input_ids=inputs["input_ids_pos"],
+                        attention_mask=inputs["attention_mask_pos"]
+                    )
+                    # 2) Forward pass on negative docs
+                    neg_output = model(
+                        input_ids=inputs["input_ids_neg"],
+                        attention_mask=inputs["attention_mask_neg"]
+                    )
+
+                    # 3) Extract the logits; shape [batch_size, num_labels].
+                    #    For a cross-encoder classification model, you might have multiple logits,
+                    #    so select the relevant dimension or reduce to a single score per doc.
+                    #    Suppose we take the first (or only) logit as the ranking score:
+                    pos_scores = pos_output.logits[:, 0]
+                    neg_scores = neg_output.logits[:, 0]
+
+                    # 4) Compute the pairwise RankNet loss:
+                    #    Loss_i = log(1 + exp( - sigma * (pos_score_i - neg_score_i) ))
+                    sigma = kwargs.get("ranknet_sigma", 1.0)  # Or store as a class attr.
+                    score_diff = pos_scores - neg_scores
+                    ranknet_loss = torch.log1p(torch.exp(-sigma * score_diff)).mean()
+
+                    if return_outputs:
+                        return (ranknet_loss, (pos_output, neg_output))
+                    return ranknet_loss
+                
+                def prediction_step(self, model, inputs, prediction_loss_only=False, ignore_keys=None):
+                    with torch.no_grad():
+                        loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
+                        pos_out, neg_out = outputs
+
+                        # Compute score difference as a tensor.
+                        score_diff_tensor = pos_out.logits[:, 0] - neg_out.logits[:, 0]
+                        # Create labels tensor with the same shape.
+                        labels = torch.ones(score_diff_tensor.shape, dtype=torch.int32, device=score_diff_tensor.device)
+                    
+                    if prediction_loss_only:
+                        return (loss, None, None)
+                    
+                    # Return tensors directly.
+                    return (loss, score_diff_tensor.detach(), labels)
 
 
 class CrossEncoderTrainer:
@@ -101,6 +186,7 @@ class CrossEncoderTrainer:
             prediction_loss_only=False,
             gradient_accumulation_steps=self.hyperparameters.get("gradient_accumulation_steps", 1),
             eval_accumulation_steps=2,
+            max_grad_norm=30,
         )
     
     @staticmethod
@@ -164,9 +250,9 @@ class CrossEncoderTrainer:
     def set_dataset_dicts(self, corpus_path):
         if corpus_path.endswith(".csv"):
             # open corpus_py.csv with pandas
-            corpus = pd.read_csv(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus_py.csv"), usecols=["Codigo", "text"])
-
+            corpus = pd.read_csv(corpus_path, usecols=["Codigo", "text"])
             docid_to_text = dict(zip(corpus["Codigo"], corpus["text"]))
+
         elif corpus_path.endswith(".json"):
             # Load corpus from JSON file.
             with open(corpus_path, 'r', encoding='utf-8') as f:
@@ -435,162 +521,49 @@ class CrossEncoderTrainer:
             TrainerClass = WeightedLossTrainer
 
         elif hp.get("loss_type") == "ranknet":
-            class RankNetTrainer(Trainer):
-                """
-                A Trainer subclass that implements the RankNet pairwise loss.
-                """
-
-                def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-                    """
-                    Compute the RankNet pairwise loss.
-
-                    Parameters
-                    ----------
-                    model : torch.nn.Module
-                        The model to train.
-                    inputs : dict
-                        A dictionary containing the batch data. Must include:
-                        - "input_ids_pos": token IDs for the positive docs
-                        - "input_ids_neg": token IDs for the negative docs
-                        - "attention_mask_pos": attention mask for the positive docs
-                        - "attention_mask_neg": attention mask for the negative docs
-                        (Adjust these names as needed if your dataset is organized differently.)
-                    return_outputs : bool
-                        Whether to return (loss, outputs) or just loss.
-                    **kwargs : dict
-                        Additional arguments.
-
-                    Returns
-                    -------
-                    torch.Tensor or (torch.Tensor, dict)
-                        The RankNet loss, with optional model outputs if return_outputs=True.
-                    """
-                    pos_label = inputs.pop("pos_label")
-                    neg_label = inputs.pop("neg_label")
-
-                    # Check that positive and negative input_ids are different.
-                    diff_mask = (inputs["input_ids_pos"] != inputs["input_ids_neg"]).any(dim=1)
-                    if not diff_mask.all():
-                        raise ValueError("Some positive and negative input_ids are identical!")
-
-                    # 1) Forward pass on positive docs
-                    pos_output = model(
-                        input_ids=inputs["input_ids_pos"],
-                        attention_mask=inputs["attention_mask_pos"]
-                    )
-                    # 2) Forward pass on negative docs
-                    neg_output = model(
-                        input_ids=inputs["input_ids_neg"],
-                        attention_mask=inputs["attention_mask_neg"]
-                    )
-
-                    # 3) Extract the logits; shape [batch_size, num_labels].
-                    #    For a cross-encoder classification model, you might have multiple logits,
-                    #    so select the relevant dimension or reduce to a single score per doc.
-                    #    Suppose we take the first (or only) logit as the ranking score:
-                    pos_scores = pos_output.logits[:, 0]
-                    neg_scores = neg_output.logits[:, 0]
-
-                    # 4) Compute the pairwise RankNet loss:
-                    #    Loss_i = log(1 + exp( - sigma * (pos_score_i - neg_score_i) ))
-                    sigma = kwargs.get("ranknet_sigma", 1.0)  # Or store as a class attr.
-                    score_diff = pos_scores - neg_scores
-                    ranknet_loss = torch.log1p(torch.exp(-sigma * score_diff)).mean()
-
-                    if return_outputs:
-                        return (ranknet_loss, (pos_output, neg_output))
-                    return ranknet_loss
-                
-                def prediction_step(self, model, inputs, prediction_loss_only=False, ignore_keys=None):
-                    with torch.no_grad():
-                        loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
-                        pos_out, neg_out = outputs
-
-                        # Compute score difference as a tensor.
-                        score_diff_tensor = pos_out.logits[:, 0] - neg_out.logits[:, 0]
-                        # Create labels tensor with the same shape.
-                        labels = torch.ones(score_diff_tensor.shape, dtype=torch.int32, device=score_diff_tensor.device)
-                    
-                    if prediction_loss_only:
-                        return (loss, None, None)
-                    
-                    # Return tensors directly.
-                    return (loss, score_diff_tensor.detach(), labels)
-
-
-            
             TrainerClass = RankNetTrainer
 
         elif hp.get("loss_type") == "graded ranknet":
-            class GradedRankNetTrainer(Trainer):
-                """
-                A Trainer subclass that implements a graded RankNet loss.
-                
-                The loss is defined as:
-                
-                    Loss = |pos_label - neg_label| * log(1 + exp(-sigma * (s_pos - s_neg)))
-                
-                where s_pos and s_neg are the scores for the positive and negative documents,
-                and sigma is a hyperparameter (default 1.0).
-                
-                The input batch is expected to have:
-                - "input_ids_pos", "attention_mask_pos" for the positive document.
-                - "input_ids_neg", "attention_mask_neg" for the negative document.
-                - "pos_label" and "neg_label" (numeric tensors).
-                """
-                
+            class GradedRankNetTrainer(RankNetTrainer):
                 def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
-                    pos_label = inputs.pop("pos_label")
-                    neg_label = inputs.pop("neg_label")
-                    # Forward pass for positive and negative examples.
+                    pos_label = inputs["pos_label"].float()
+                    neg_label = inputs["neg_label"].float()
+                    
+                    # Forward pass on positive docs
                     pos_output = model(
                         input_ids=inputs["input_ids_pos"],
                         attention_mask=inputs["attention_mask_pos"]
                     )
+                    # Forward pass on negative docs
                     neg_output = model(
                         input_ids=inputs["input_ids_neg"],
                         attention_mask=inputs["attention_mask_neg"]
                     )
                     
-                    # Extract ranking scores (assumes the score is the first logit)
+                    # Get the scores
                     pos_scores = pos_output.logits[:, 0]
                     neg_scores = neg_output.logits[:, 0]
                     
-                    # Get sigma from kwargs (default 1.0)
+                    # Get sigma and compute score differences.
                     sigma = kwargs.get("ranknet_sigma", 1.0)
-                    
-                    # Compute the score difference
                     score_diff = pos_scores - neg_scores
                     
-                    # Get the graded labels and compute the absolute difference
-                    pos_label = pos_label.float()
-                    neg_label = neg_label.float()
+                    # Compute the elementwise RankNet loss (no mean yet)
+                    elementwise_loss = torch.log1p(torch.exp(-sigma * score_diff))
+                    
+                    # Compute grade difference for each pair.
                     grade_diff = torch.abs(pos_label - neg_label)
                     
-                    # Compute the weighted RankNet loss for each pair
-                    loss = (grade_diff * torch.log1p(torch.exp(-sigma * score_diff))).mean()
+                    # Weight the loss per example by the grade difference
+                    weighted_loss = grade_diff * elementwise_loss
                     
-                    return (loss, (pos_output, neg_output)) if return_outputs else loss
-                
-                def prediction_step(self, model, inputs, prediction_loss_only=True, ignore_keys=None):
-                    """
-                    Uses the same pairwise logic for evaluation by calling `compute_loss`.
-                    """
-                    # Call compute_loss with return_outputs=True
-                    loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
-
-                    if prediction_loss_only:
-                        return (loss, None, None)
-
-                    # The outputs are (pos_out, neg_out). Let's produce some dummy predictions:
-                    pos_out, neg_out = outputs
-                    # For logging, we can treat the difference in scores as 'preds':
-                    preds = (pos_out.logits[:, 0] - neg_out.logits[:, 0]).detach()
-                    # And the difference in labels (if you want) as 'labels'
-                    # or just set to None if you don't want them.
-                    labs = None
-
-                    return (loss, preds, labs)
+                    # Finally, compute the mean over the batch.
+                    loss = weighted_loss.mean()
+                    
+                    outputs = (pos_output, neg_output)
+                    if return_outputs:
+                        return (loss, outputs)
+                    return loss
                 
             TrainerClass = GradedRankNetTrainer
 
@@ -728,93 +701,196 @@ class CrossEncoderTrainer:
         log_plot(exp_dir, exp_id, training_results)
 
 
-def main():
+def main_loop():
     """
-    Main function to load the dataset from the hub, split it, and run training and evaluation.
+    Main loop to run cross-encoder training experiments over multiple learning rates.
+    
+    This function iterates over a list of learning rates (1e-5, 2e-5, 3e-5), updates
+    the hyperparameters accordingly, and runs the training and evaluation pipeline.
+    The resulting models and metrics are saved to separate output directories.
     """
+    # Base configuration.
     model_checkpoint = "mrm8488/legal-longformer-base-8192-spanish"
-    # model_checkpoint = "joelniklaus/legal-xlm-roberta-base"
-    hyperparameters = {
-        "epochs": 1,
+    base_hyperparameters = {
+        "epochs": 8,
         "batch_size": 4,
         "weight_decay": 0.01,
-        "learning_rate": 2e-5,
+        "learning_rate": 2e-5,  # placeholder; will be overridden
         "warmup_ratio": 0.1,
         "metric_for_best_model": "eval_pairwise_accuracy",
         "early_stopping_patience": 6,
         "max_length": 2048,
-        'output_dir': os.path.join(STORAGE_DIR, "legal_ir", "results", "cross_encoder_fine_2048_ranknet_GPT_cleaned"),
-        # 'gradient_accumulation_steps': 4,
-        "loss_type": "ranknet",   # "weighted" or "focal" or "ranknet" or "graded ranknet"
-        # "focal_gamma": 1.0,
+        "output_dir": os.path.join(STORAGE_DIR, "legal_ir", "results"),
+        "loss_type": "ranknet",  # Using ranknet branch
+        "gradient_accumulation_steps": 1
     }
-    # Set the number of labels; adjust as needed
     num_labels = 4
+    # List of learning rates to try.
+    learning_rates = [1e-5, 2e-5, 3e-5]
 
-    # Initialize the trainer.
-    cross_encoder = CrossEncoderTrainer(model_checkpoint, num_labels, hyperparameters)
-
-    cross_encoder.set_dataset_dicts(corpus_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "external", "BatchAPI_outputs", "cleanup", "corpus_Gpt4o-mini_cleaned.json"))
-
-    # Load and split the dataset
-    if hyperparameters.get("loss_type") == "focal" or hyperparameters.get("loss_type") == "weighted":
-        ds_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", "cross_encoder_ds_finegrained")
-        train_ds, val_ds, test_ds = cross_encoder.load_and_split_dataset(
-            ds_path, test_size=0.2, val_size=0.1, max_length=hyperparameters["max_length"]
+    for lr in learning_rates:
+        # Update hyperparameters for this run.
+        hyperparameters = base_hyperparameters.copy()
+        hyperparameters["learning_rate"] = lr
+        # Update output_dir to include the learning rate in the folder name.
+        hyperparameters["output_dir"] = os.path.join(
+            STORAGE_DIR, "legal_ir", "results", f"cross_encoder_lr_{lr}_ranknet"
         )
-    elif hyperparameters.get("loss_type") == "ranknet":
+
+        print(f"\n=== Running cross-encoder training with learning_rate = {lr} ===")
+
+        # Initialize the trainer.
+        cross_encoder = CrossEncoderTrainer(model_checkpoint, num_labels, hyperparameters)
+        # Set up dataset dictionaries (using cleaned texts from your JSON corpus).
+        corpus_path = os.path.join(
+            STORAGE_DIR, "legal_ir", "data", "external", "BatchAPI_outputs", "cleanup", "corpus_Gpt4o-mini_cleaned.json"
+        )
+        cross_encoder.set_dataset_dicts(corpus_path=corpus_path)
+
+        # Load and split the ranknet triplet dataset.
         ds_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "triplet_ds_standard_ranknet")
         train_ds, val_ds, test_ds = cross_encoder.prepare_ranknet_ds(
             ds_path, test_size=0.2, val_size=0.1, max_length=hyperparameters["max_length"]
         )
-    elif hyperparameters.get("loss_type") == "graded ranknet":
-        ds_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "triplet_ds_graded_ranknet")
-        train_ds, val_ds, test_ds = cross_encoder.prepare_ranknet_ds(
-            ds_path, test_size=0.2, val_size=0.1, max_length=hyperparameters["max_length"]
-        )
 
-    # cut train_ds to limit
-    train_ds = train_ds.select(range(100))
+        # Optionally, restrict training to a subset for testing.
+        train_ds = train_ds.select(range(100))
 
-    # Setup the trainer with training and validation sets.
-    cross_encoder.setup_trainer(train_ds, val_ds)
+        # Set up the Trainer with the training and validation sets.
+        cross_encoder.setup_trainer(train_ds, val_ds)
 
-    # Train the model.
-    cross_encoder.train()
+        # Train the model.
+        cross_encoder.train()
 
-    # Evaluate the model.
-    cross_encoder.evaluate(test_ds)
+        # Evaluate the model and print metrics.
+        metrics = cross_encoder.evaluate(test_ds)
+        print(f"Metrics for learning_rate = {lr}: {metrics}")
 
-    # Save the model and tokenizer.
-    cross_encoder.save()
+        # Save the trained model and tokenizer.
+        cross_encoder.save()
 
-    # evaluate IR metrics
-    evaluator = Evaluator(ds="legal",
-                          model_name="bm25",
-                          metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
-                          rerank=True,
-                          reranker_model=cross_encoder.model,
-                          tokenizer=cross_encoder.tokenizer,
-                        #   model_instance=model
-                )
-    evaluator.evaluate()
+        # Optionally, log the experiment (you can also collect metrics in a summary list)
+        exp_id = "exp_" + uuid.uuid4().hex[:8]
+        # Here you can log with a custom logging function if needed.
+        # Example:
+        # cross_encoder.log_experiment(exp_id, "triplet_ds_standard_ranknet", hyperparameters["loss_type"], "RTX A5000", metrics)
 
-    ir_metrics = {
-        "ndcg": evaluator.metrics["ndcg"],
-        "ndcg_cut_10": evaluator.metrics["ndcg_cut_10"],
-        "recall_1000": evaluator.metrics["recall_1000"],
-        "recall_100": evaluator.metrics["recall_100"],
-        "recall_10": evaluator.metrics["recall_10"],
-        "recip_rank": evaluator.metrics["recip_rank"],
+
+def main():
+    # Base configuration.
+    model_checkpoint = "mrm8488/legal-longformer-base-8192-spanish"
+    hyperparameters = {
+        "epochs": 8,
+        "batch_size": 4,
+        "weight_decay": 0.01,
+        "learning_rate": 2e-5,  # placeholder; will be overridden
+        "warmup_ratio": 0.1,
+        "metric_for_best_model": "eval_pairwise_accuracy",
+        "early_stopping_patience": 6,
+        "max_length": 2048,
+        "output_dir": os.path.join(STORAGE_DIR, "legal_ir", "results"),
+        "loss_type": "graded ranknet",  # Using ranknet branch
+        "gradient_accumulation_steps": 4,
+        "corpus_type": "cleaned",
     }
 
-    # Replace 'gpu_name' with your actual GPU name if available.
-    gpu_name = "RTX A5000"
-    exp_id = "exp_" + uuid.uuid4().hex[:8]
-    dataset_name = "cross_encoder_ds_finegrained"
-    loss_name = hyperparameters.get("loss_type", "")
-    cross_encoder.log_experiment(exp_id, dataset_name, loss_name, gpu_name, ir_metrics)
+    num_labels = 4
+    # List of learning rates to try.
+    learning_rates = [3e-5]
 
+    for lr in learning_rates:
+        # Update hyperparameters for this run.
+        hyperparameters = hyperparameters.copy()
+        hyperparameters["learning_rate"] = lr
+
+        # Update output_dir to include the learning rate in the folder name.
+        hyperparameters["output_dir"] = os.path.join(
+            STORAGE_DIR, "legal_ir", "results", f"cross_encoder_lr_{lr}_graded_ranknet"
+        )
+
+        print(f"\n=== Running cross-encoder training with learning_rate = {lr} ===")
+
+        # Initialize the trainer.
+        cross_encoder = CrossEncoderTrainer(model_checkpoint, num_labels, hyperparameters)
+
+        if hyperparameters["corpus_type"] == "original":
+            cross_encoder.set_dataset_dicts(
+                corpus_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus_py.csv")
+            )        
+        elif hyperparameters["corpus_type"] == "cleaned":
+            cross_encoder.set_dataset_dicts(
+                corpus_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "external", "BatchAPI_outputs", "cleanup", "corpus_Gpt4o-mini_cleaned.json")
+            )
+
+        # Load and split the dataset
+        if hyperparameters["loss_type"] in ["focal", "weighted"]:
+            ds_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", "cross_encoder_ds_finegrained")
+            train_ds, val_ds, test_ds = cross_encoder.load_and_split_dataset(
+                ds_path,
+                test_size=0.2,
+                val_size=0.1,
+                max_length=hyperparameters["max_length"]
+            )
+        elif hyperparameters["loss_type"] == "ranknet":
+            ds_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "triplet_ds_standard_ranknet")
+            train_ds, val_ds, test_ds = cross_encoder.prepare_ranknet_ds(
+                ds_path,
+                test_size=0.2,
+                val_size=0.1,
+                max_length=hyperparameters["max_length"]
+            )
+        elif hyperparameters["loss_type"] == "graded ranknet":
+            ds_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "triplet_ds_graded_ranknet")
+            train_ds, val_ds, test_ds = cross_encoder.prepare_ranknet_ds(
+                ds_path,
+                test_size=0.2,
+                val_size=0.1,
+                max_length=hyperparameters["max_length"]
+            )
+        
+        # Optionally limit the training size for debugging.
+        # train_ds = train_ds.select(range(100))
+        # test_ds = test_ds.select(range(50))
+
+        # Setup the trainer.
+        cross_encoder.setup_trainer(train_ds, val_ds)
+
+        # Train the model.
+        cross_encoder.train()
+
+        # Evaluate the model.
+        eval_metrics = cross_encoder.evaluate(test_ds)
+        print(f"Eval metrics for learning_rate = {lr}: {eval_metrics}")
+
+        # Save the model and tokenizer.
+        cross_encoder.save()
+
+        # Evaluate IR metrics.
+        evaluator = Evaluator(
+            ds="legal",
+            model_name="bm25",
+            metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
+            rerank=True,
+            reranker_model=cross_encoder.model,
+            tokenizer=cross_encoder.tokenizer,
+        )
+        evaluator.evaluate()
+
+        ir_metrics = {
+            "pairwise_acc": eval_metrics.get("eval_pairwise_accuracy", "N/A"),
+            "ndcg": evaluator.metrics["ndcg"],
+            "ndcg_cut_10": evaluator.metrics["ndcg_cut_10"],
+            "recall_1000": evaluator.metrics["recall_1000"],
+            "recall_100": evaluator.metrics["recall_100"],
+            "recall_10": evaluator.metrics["recall_10"],
+            "recip_rank": evaluator.metrics["recip_rank"],
+        }
+
+        gpu_name = "RTX A5000"
+        exp_id = "exp_" + uuid.uuid4().hex[:8]
+        dataset_name = "cross_encoder_ds_finegrained"
+        loss_name = hyperparameters["loss_type"]
+        cross_encoder.log_experiment(exp_id, dataset_name, loss_name, gpu_name, ir_metrics)
 
 if __name__ == "__main__":
     main()
