@@ -420,6 +420,284 @@ def embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run):
     return run
 
 
+from transformers import AutoTokenizer
+def embed_bge_sliding_window(model, doc_dict, query_dict, reuse_run):
+    """
+    Embed queries and chunked documents with BGE-M3 dense head,
+    apply sliding-window chunking, and compute max-pooled similarity per doc.
+
+    Parameters
+    ----------
+    model : BGEM3FlagModel
+        BGE-M3 model instance.
+    docs : dict
+        Mapping from document_id to full document text.
+    queries : list of str
+        Query strings.
+    doc_ids : list
+        Ordered list of document identifiers (keys of `docs`).
+    query_ids : list
+        Ordered list of query identifiers.
+    reuse_run : bool
+        Unused here.
+
+    Returns
+    -------
+    dict
+        Mapping from run name to retrieval result dict.
+    """
+    # sliding window parameters
+    chunk_size = 1024
+    stride     = 256
+
+    doc_ids = list(doc_dict.keys())
+    query_ids = list(query_dict.keys())
+    query_texts = list(query_dict.values())
+
+    # instantiate a fast tokenizer (no special tokens, so chunks align simply)
+    tokenizer = AutoTokenizer.from_pretrained(
+        "BAAI/bge-m3",
+        use_fast=True,
+    )
+
+    # 1) build a flat list of (doc_id, chunk_text)
+    chunk_map = []
+    for doc_id in tqdm(doc_ids):
+        text = doc_dict[doc_id]
+        toks = tokenizer.encode(text, add_special_tokens=False)
+        for start in range(0, len(toks), stride):
+            window = toks[start : start + chunk_size]
+            if not window:
+                break
+            chunk_map.append((doc_id, tokenizer.decode(window, skip_special_tokens=True)))
+
+    # unzip
+    chunk_doc_ids = [did for did, _ in chunk_map]
+    chunk_texts  = [ct  for _,  ct in chunk_map]
+
+    # 2) encode queries and chunks (dense head only)
+    print("Encoding queries...", end="")
+    q_emb = model.encode(
+        query_texts,
+        batch_size=8,
+        max_length=MAX_QUERY_LEN
+    )["dense_vecs"]
+    print("Done.")
+
+    print("Encoding chunks...", end="")
+    c_emb = model.encode(
+        chunk_texts,
+        batch_size=8,
+        max_length=chunk_size
+    )["dense_vecs"]
+    print("Done.")
+
+    # to tensors
+    q_t = torch.tensor(q_emb, dtype=torch.float32)       # (Q, D)
+    c_t = torch.tensor(c_emb, dtype=torch.float32)       # (C, D)
+
+    # 3) raw sim: (Q x C)
+    raw_sim = q_t @ c_t.T
+
+    print("Computing max-pool chunk sims...", end="")
+    # 4) max-pool chunk sims up to doc level
+    Q, D = raw_sim.size(0), len(doc_dict)
+    sim = torch.full((Q, D), -np.inf)
+    pools = {}
+    for idx, did in enumerate(tqdm(chunk_doc_ids)):
+        pools.setdefault(did, []).append(idx)
+
+    pooling_strategy = "top_3"
+
+    for j, did in enumerate(tqdm(doc_ids)):
+        idxs = pools.get(did, [])
+        if idxs:
+            if pooling_strategy == "max":
+                sim[:, j], _ = raw_sim[:, idxs].max(dim=1)
+            elif pooling_strategy == "top_3":
+                vals, _ = raw_sim[:, idxs].topk(3, dim=1)
+                sim[:, j] = vals.mean(dim=1)
+    print("Done.")
+
+    # 5) retrieve using your existing function
+    run = retrieve(list(query_dict.keys()), list(doc_dict.keys()), sim)
+    return run
+
+
+def compute_sparse_similarity(model, q_lex_list, d_lex_list):
+    """
+    Compute pairwise sparse similarity matrix using model.compute_lexical_matching_score.
+
+    Parameters
+    ----------
+    model : BGEM3FlagModel
+        BGE-M3 model instance.
+    q_lex_list : list of dict
+        Query lexical_weights.
+    d_lex_list : list of dict
+        Document lexical_weights.
+
+    Returns
+    -------
+    torch.Tensor
+        Similarity matrix of shape (num_queries, num_docs).
+    """
+    num_q, num_d = len(q_lex_list), len(d_lex_list)
+    sim = torch.zeros(num_q, num_d, dtype=torch.float32)
+    print("Computing sparse similarity...", end="")
+    for i, qw in tqdm(enumerate(q_lex_list)):
+        for j, dw in enumerate(d_lex_list):
+            sim[i, j] = float(model.compute_lexical_matching_score(qw, dw))
+    print("Done.")
+    return sim
+
+
+def compute_colbert_similarity(q_col_list, d_col_list, model):
+    """
+    Compute pairwise ColBERT similarity matrix using the model's colbert_score.
+
+    Parameters
+    ----------
+    q_col_list : list of array-like, shape (Lq, 128)
+        Query token vectors.
+    d_col_list : list of array-like, shape (Ld, 128)
+        Document token vectors.
+    model : BGEM3FlagModel
+        Model with `colbert_score` method.
+
+    Returns
+    -------
+    torch.Tensor
+        Similarity matrix of shape (num_queries, num_docs).
+    """
+    print("Computing ColBERT similarity...", end="")
+    num_q = len(q_col_list)
+    num_d = len(d_col_list)
+    sim = torch.zeros(num_q, num_d, dtype=torch.float32)
+    for i in tqdm(range(num_q)):
+        for j in range(num_d):
+            sim[i, j] = float(model.colbert_score(q_col_list[i], d_col_list[j]))
+    print("Done.")
+    return sim
+
+
+def per_query_zscore(sim: torch.Tensor) -> torch.Tensor:
+    mu = sim.mean(dim=1, keepdim=True)
+    sigma = sim.std(dim=1, unbiased=False, keepdim=True) + 1e-9
+    return (sim - mu) / sigma
+
+
+def per_query_minmax(sim: torch.Tensor) -> torch.Tensor:
+    minv = sim.min(dim=1, keepdim=True).values
+    maxv = sim.max(dim=1, keepdim=True).values
+    return (sim - minv) / (maxv - minv + 1e-9)
+
+
+def rrf(sim: torch.Tensor, k: int = 60) -> torch.Tensor:
+    # Higher score = better → get ranks (1‑based)
+    ranks = sim.argsort(dim=1, descending=True).argsort(dim=1) + 1
+    return 1.0 / (k + ranks.float())
+
+
+def embed_bge_sparse(model, docs, queries, doc_ids, query_ids, reuse_run):
+    """
+    Embed queries and docs with BGE-M3 heads and compute zero-shot runs.
+
+    Parameters
+    ----------
+    model : BGEM3FlagModel
+        BGE-M3 model instance.
+    docs : dict of {hashable: str}
+        Mapping from document IDs to document texts.
+    queries : list of str
+        Query strings.
+    doc_ids : list
+        Ordered list of document identifiers.
+    query_ids : list
+        Ordered list of query identifiers.
+    reuse_run : bool
+        If True, attempt to reuse existing runs (not used).
+
+    Returns
+    -------
+    dict of str -> dict
+        Mapping from run name to retrieval results
+        (query -> list of (score, text, doc_id)).
+    """
+    # 1) Encode queries and docs
+    print("Embedding queries...", end="")
+    q_out = model.encode(
+        queries,
+        batch_size=16,
+        max_length=MAX_QUERY_LEN,
+        return_dense=True,
+        return_sparse=True,
+        return_colbert_vecs=True,
+    )
+    print("Done.")
+    print("Embedding docs...", end="")
+    d_out = model.encode(
+        docs,
+        batch_size=16,
+        max_length=MAX_DOC_LEN,
+        return_dense=True,
+        return_sparse=True,
+        return_colbert_vecs=True,
+    )
+    print("Done.")
+
+    # 2) Compute individual similarity matrices
+    dense_score = compute_similarity(
+        torch.tensor(q_out["dense_vecs"], dtype=torch.float32),
+        torch.tensor(d_out["dense_vecs"], dtype=torch.float32),
+    )
+    sparse_sim = compute_sparse_similarity(
+        model,
+        q_out["lexical_weights"],
+        d_out["lexical_weights"],
+    )
+    colbert_sim = compute_colbert_similarity(
+        q_out["colbert_vecs"],
+        d_out["colbert_vecs"],
+        model,
+    )
+
+    NORM = "z"
+
+    # after you've built dense_score, sparse_sim, colbert_sim …
+    if NORM == "z":
+        dense_n  = per_query_zscore(dense_score)
+        sparse_n = per_query_zscore(sparse_sim)
+        colbert_n = per_query_zscore(colbert_sim)
+    elif NORM == "minmax":
+        dense_n  = per_query_minmax(dense_score)
+        sparse_n = per_query_minmax(sparse_sim)
+        colbert_n = per_query_minmax(colbert_sim)
+    elif NORM == "rrf":
+        dense_n  = rrf(dense_score)
+        sparse_n = rrf(sparse_sim)
+        colbert_n = rrf(colbert_sim)
+    else:  # raw
+        dense_n, sparse_n, colbert_n = dense_score, sparse_sim, colbert_sim
+
+    # then fuse the *normalized* matrices
+    dense_sparse_sim  = 0.5 * dense_n + 0.5 * sparse_n
+    dense_colbert_sim = 0.5 * dense_n + 0.5 * colbert_n
+    sparse_colbert_sim = 0.5 * sparse_n + 0.5 * colbert_n
+    all_three_sim = (dense_n + sparse_n + colbert_n) / 3.0
+
+    # 4) Retrieve runs for each similarity
+    runs = {
+        "dense": retrieve(query_ids, doc_ids, dense_score),
+        "sparse": retrieve(query_ids, doc_ids, sparse_sim),
+        "colbert": retrieve(query_ids, doc_ids, colbert_sim),
+        "dense_sparse": retrieve(query_ids, doc_ids, dense_sparse_sim),
+        "dense_colbert": retrieve(query_ids, doc_ids, dense_colbert_sim),
+        "sparse_colbert": retrieve(query_ids, doc_ids, sparse_colbert_sim),
+        "all_three": retrieve(query_ids, doc_ids, all_three_sim),
+    }
+    return runs
+
 def get_sim_bge(model, docs, queries):
     embeddings_queries = model.encode(queries, batch_size=8, max_length=MAX_QUERY_LEN)['dense_vecs']
     print("Embedding docs...", end="")
@@ -1022,49 +1300,31 @@ def retrieve_bm25(docs, queries, doc_ids, query_ids):
 
 
 def merge_reranked_into_full_run(full_run, reranked_run):
-    """
-    Merge a full run (from a bi-encoder) with a reranked run (from a cross-encoder)
-    in such a way that:
-      - The original scores for documents not reranked are preserved.
-      - The top_k documents (i.e. those in reranked_run) are given an offset boost 
-        so that they always remain above non reranked documents.
-    
-    Parameters
-    ----------
-    full_run : dict
-        Dictionary mapping query_id -> {doc_id: original_bi_encoder_score, ...}
-    reranked_run : dict
-        Dictionary mapping query_id -> {doc_id: cross_encoder_score, ...} for the top‑k documents.
-    
-    Returns
-    -------
-    dict
-        A merged run where, for each query, documents in reranked_run have their scores
-        boosted by an offset (set to one more than the maximum original score for that query),
-        ensuring that no document outside top‑k can move into the top‑k positions.
-    """
     merged_run = {}
-    for query_id, original_scores in full_run.items():
-        # Get the reranked docs (if any) for this query.
-        reranked_docs = reranked_run.get(query_id, {})
-        # Determine the offset: one more than the maximum original score.
-        max_original = max(original_scores.values()) if original_scores else 0
-        offset = max_original + 1
-        updated_run = {}
-        for doc_id, orig_score in original_scores.items():
-            if doc_id in reranked_docs:
-                # For reranked docs, use the cross-encoder score plus offset.
-                updated_run[doc_id] = reranked_docs[doc_id] + offset
-            else:
-                # Otherwise, keep the original score.
-                updated_run[doc_id] = orig_score
-        # Re-sort the updated run in descending order.
-        merged_run[query_id] = dict(sorted(updated_run.items(), key=lambda x: x[1], reverse=True))
+    for qid, orig_scores in full_run.items():
+        rerank_scores = reranked_run.get(qid, {})
+
+        if rerank_scores:
+            # find absolute minimum CE score so we can dominate it
+            min_ce = min(rerank_scores.values())
+            # offset = max_original - min_ce + ε  (ε=1 e‑3 keeps ties broken)
+            offset = max(orig_scores.values()) - min_ce + 1e-3
+        else:
+            offset = 0
+
+        updated = {}
+        for did, score in orig_scores.items():
+            updated[did] = (
+                rerank_scores[did] + offset if did in rerank_scores else score
+            )
+
+        # store sorted by score desc
+        merged_run[qid] = dict(sorted(updated.items(), key=lambda x: x[1], reverse=True))
     return merged_run
 
 
 import random
-def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs, doc_ids, max_length, batch_size=8):
+def rerank_cross_encoder(model, model_type, tokenizer, run, top_k, query_dict, doc_dict, max_length, batch_size=8):
     """
     Rerank the provided run using a cross-encoder scorer. This function creates a 
     CrossEncoderScorer instance that abstracts the underlying model's scoring mechanism,
@@ -1075,6 +1335,8 @@ def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs,
     ----------
     model : torch.nn.Module
         The trained cross-encoder model.
+    model_type : str
+        The type of the model (e.g., "bge", "ranknet").
     tokenizer : transformers.PreTrainedTokenizer
         The corresponding tokenizer.
     run : dict
@@ -1099,13 +1361,16 @@ def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs,
     dict
         A merged run with the reranked scores.
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    model.eval()
-
-    # Create dictionaries for quick lookup.
-    doc_dict = {doc_id: doc for doc_id, doc in zip(doc_ids, docs)}
-    query_dict = {str(query_id): query for query_id, query in zip(query_ids, queries)}
+    if model_type == "bge":
+        from FlagEmbedding import FlagLLMReranker
+        model = FlagLLMReranker('BAAI/bge-reranker-v2-gemma', use_bf16=True)    # use_bf16=True
+    elif model_type == "sbert":
+        from sentence_transformers import CrossEncoder
+        model = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device)
+        model.eval()
 
     # Limit each query's candidates to top_k.
     reranked_run = {}
@@ -1113,28 +1378,25 @@ def rerank_cross_encoder(model, tokenizer, run, top_k, queries, query_ids, docs,
         reranked_run[query_id] = dict(sorted(run[query_id].items(), key=lambda x: x[1], reverse=True)[:top_k])
 
     # Instantiate the scorer.
-    scorer = CrossEncoderScorer(model, tokenizer, head_type="ranknet")
+    scorer = CrossEncoderScorer(model, tokenizer, head_type=model_type)
 
     # Iterate over each query.
     for query_id, doc_score_dict in tqdm(reranked_run.items(), total=len(reranked_run)):
         curr_doc_ids = list(doc_score_dict.keys())
-        scores = []
+        query_scores = []
         query_text = query_dict[query_id]
         # Process in batches.
         for start_idx in range(0, len(curr_doc_ids), batch_size):
             end_idx = min(start_idx + batch_size, len(curr_doc_ids))
             batch_doc_ids = curr_doc_ids[start_idx:end_idx]
-            # For each document in the batch, compute the score.
-            for doc_id in batch_doc_ids:
-                doc_text = doc_dict[int(doc_id)]
-                score = scorer.score(query_text, doc_text, max_length=max_length)
-                # score = random.random()
-                scores.append(score)
+            batch_doc_texts = [doc_dict[str(doc_id)] for doc_id in batch_doc_ids]
+            scores = scorer.score([query_text]*len(batch_doc_texts), batch_doc_texts, max_length=max_length)
+            # score = random.random()
+            query_scores.extend(scores)
         # Build a new dict mapping doc_ids to their new scores.
-        reranked_run[query_id] = {curr_doc_ids[i]: float(scores[i]) for i in range(len(curr_doc_ids))}
+        reranked_run[query_id] = {curr_doc_ids[i]: float(query_scores[i]) for i in range(len(curr_doc_ids))}
 
-    return merge_reranked_into_full_run(run, reranked_run)
-
+    return merge_reranked_into_full_run(run, reranked_run)   
 
 
 def get_eval_metrics(run, qrels_dev_df, all_docids, metrics):
@@ -1154,30 +1416,49 @@ def get_eval_metrics(run, qrels_dev_df, all_docids, metrics):
         qrels[query_id][doc_id] = relevance
     
     evaluator = pytrec_eval.RelevanceEvaluator(qrels, metrics)
-    results = evaluator.evaluate(run)
-    print("Evaluation done.")
-
-    with open("metrics_per_query.pkl", "wb") as f:
-        pickle.dump(results, f)
-
-    result_values = list(results.values())
-    metric_names = list(result_values[0].keys())      # because some result names change e.g. from ndcg_cut.10 to ndcg_cut_10
-    metric_sums = {metric_name: 0 for metric_name in metric_names}
-    for metrics_ in results.values():
-        for metric in metric_names:
-            metric_sums[metric] += metrics_[metric]
+    # check instance of run
+    if len(run) < 10:
+        metrics_all = {}
+        for run_name, run in run.items():
+            results = evaluator.evaluate(run)
     
-    # Average metrics over all queries
-    # assert len(results) == len(query_ids)
-    avg_metrics = {metric_name: metric_sums[metric_name]/len(results) for metric_name in metric_names}
-    
-    print("\nResults:")
-    for metric_name, metric_value in avg_metrics.items():
-        print(f"Average {metric_name}: {metric_value}")
+            result_values = list(results.values())
+            metric_names = list(result_values[0].keys())      # because some result names change e.g. from ndcg_cut.10 to ndcg_cut_10
+            metric_sums = {metric_name: 0 for metric_name in metric_names}
+            for metrics_ in results.values():
+                for metric in metric_names:
+                    metric_sums[metric] += metrics_[metric]
+            
+            # Average metrics over all queries
+            avg_metrics = {metric_name: metric_sums[metric_name]/len(results) for metric_name in metric_names}
+            
+            metrics_all[run_name] = avg_metrics
 
-    print("\n")
+            print("\nResults:")
+            for metric_name, metric_value in avg_metrics.items():
+                print(f"Average {metric_name}: {metric_value}")
+
+            print("\n")
     
-    return avg_metrics
+    else:
+        results = evaluator.evaluate(run)
+    
+        result_values = list(results.values())
+        metric_names = list(result_values[0].keys())      # because some result names change e.g. from ndcg_cut.10 to ndcg_cut_10
+        metric_sums = {metric_name: 0 for metric_name in metric_names}
+        for metrics_ in results.values():
+            for metric in metric_names:
+                metric_sums[metric] += metrics_[metric]
+        
+        # Average metrics over all queries
+        # assert len(results) == len(query_ids)
+        avg_metrics = {metric_name: metric_sums[metric_name]/len(results) for metric_name in metric_names}
+        
+        print("\nResults:")
+        for metric_name, metric_value in avg_metrics.items():
+            print(f"Average {metric_name}: {metric_value}")
+
+        print("\n")
 
 
 def create_results_file(run):
@@ -1239,7 +1520,10 @@ def get_legal_dataset(path):
         # Load the dataset
         df = pd.read_csv(path, usecols=["Codigo", "text"])
     # convert Codigo column to list
-    df["Codigo"] = df["Codigo"].astype(int)
+    print("Codigo dtype", df["Codigo"].dtype)
+    # convert Codigo column datatype to str
+    df["Codigo"] = df["Codigo"].astype(str)
+    print("Codigo dtype", df["Codigo"].dtype)
     return df["Codigo"].tolist(), df["text"].tolist()
 
 
@@ -1247,5 +1531,5 @@ def get_legal_queries(path):
     # Load the queries
     df = pd.read_csv(path, usecols=["topic_id", "Query"])
     # convert topic_id column to list
-    df["topic_id"] = df["topic_id"].astype(int)
+    df["topic_id"] = df["topic_id"].astype(str)
     return df["topic_id"].tolist(), df["Query"].tolist()

@@ -28,6 +28,8 @@ from src.utils.retrieval_utils import (
     embed_chunkwise,
     get_sim_bge,
     chunk_by_paragraphs,
+    embed_bge_sparse,
+    embed_bge_sliding_window
 )
 
 from src.utils.train_utils import (
@@ -74,7 +76,7 @@ class Evaluator:
         self.tokenizer = tokenizer
         self.reranker_model = reranker_model
 
-        self.device = torch.device("cuda:1")
+        self.device = torch.device("cuda:0")
         self.docs = None
         self.doc_ids = None
         self.queries = None
@@ -137,9 +139,12 @@ class Evaluator:
         elif self.ds == "messirve":
             self.docs, self.queries, self.doc_ids, self.query_ids = get_messirve_corpus("ar")
         elif self.ds == "legal":
-            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus_py.csv"))
-            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "external/BatchAPI_outputs/cleanup/corpus_Gpt4o-mini_cleaned.json"))
+            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus_py.csv"))
+            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus_raw_google_ocr.csv"))
+            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "external/BatchAPI_outputs/cleanup/corpus_Gpt4o-mini_cleaned.json"))
+            self.doc_dict = {doc_id: doc for doc_id, doc in zip(self.doc_ids, self.docs)}
             self.query_ids, self.queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "queries_57.csv"))
+            self.query_dict = {query_id: query for query_id, query in zip(self.query_ids, self.queries)}
 
             qrels_dev_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qrels_py.tsv")
             self.qrels_dev_df = pd.read_csv(
@@ -155,7 +160,7 @@ class Evaluator:
             raise ValueError("Dataset not supported.")
         print("Data prepared.")
 
-    def _process_run(self, run_path, compute_fn):
+    def _process_run(self, compute_fn):
         """
         Checks if the run file exists; if not, computes the run using the provided function,
         then pickles the result.
@@ -167,16 +172,8 @@ class Evaluator:
         compute_fn : callable
             Function that computes the run.
         """
-        if not os.path.exists(run_path) or not self.reuse_run:
-            self.run = compute_fn()
-            with open(run_path, "wb") as f:
-                pickle.dump(self.run, f)
-            print(f"Run computed and saved to {run_path}")
-        else:
-            with open(run_path, "rb") as f:
-                self.run = pickle.load(f)
-            print(f"Run loaded from {run_path}")
-
+        self.run = compute_fn()
+        
     def get_run(self):
         """
         Retrieves or computes the run based on the model name.
@@ -184,7 +181,15 @@ class Evaluator:
         # Mapping of model names to their respective computation lambdas.
         model_mapping = {
             "bm25": lambda: retrieve_bm25(self.docs, self.queries, self.doc_ids, self.query_ids),
+            "bge-sliding": lambda: embed_bge_sliding_window(
+                get_bge_m3_model('BAAI/bge-m3'),
+                self.doc_dict, self.query_dict, self.reuse_run
+            ),
             "bge": lambda: embed_bge(
+                get_bge_m3_model('BAAI/bge-m3'),
+                self.docs, self.queries, self.doc_ids, self.query_ids, self.reuse_run
+            ),
+            "bge-sparse": lambda: embed_bge_sparse(
                 get_bge_m3_model('BAAI/bge-m3'),
                 self.docs, self.queries, self.doc_ids, self.query_ids, self.reuse_run
             ),
@@ -211,20 +216,18 @@ class Evaluator:
         if self.model_name not in model_mapping:
             raise ValueError("Model not supported.")
 
-        # Example: using 'ar' as a placeholder for country code.
-        run_path = f"run_{self.model_name}_ar.pkl"
-        self._process_run(run_path, model_mapping[self.model_name])
+        self._process_run(model_mapping[self.model_name])
 
     def rerank_run(self):
         # for each query rerank the top 1000 docs
-        self.run = rerank_cross_encoder(self.reranker_model, self.tokenizer, self.run, 100, self.queries, self.query_ids, self.docs, self.doc_ids,
+        self.run = rerank_cross_encoder(self.reranker_model, "bge", self.tokenizer, self.run, 100, self.query_dict, self.doc_dict,
                                 max_length=2048)
 
     def get_metrics(self):
-        self.metrics = get_eval_metrics(self.run, self.qrels_dev_df, self.doc_ids, self.metric_names)
-        create_results_file(self.run)
-        create_predictions_file(self.run)   # create TREC style qrel file (contains same info as results.txt)
-        msmarco_eval_ranking.main(self.path_to_reference_qrels, "results.txt")
+        get_eval_metrics(self.run, self.qrels_dev_df, self.doc_ids, self.metric_names)
+        # create_results_file(self.run)
+        # create_predictions_file(self.run)   # create TREC style qrel file (contains same info as results.txt)
+        # msmarco_eval_ranking.main(self.path_to_reference_qrels, "results.txt")
 
     def create_run_df(self, run, top_k=5):
         """
@@ -337,6 +340,9 @@ def main():
                 )
     evaluator.evaluate()
 
+import os
+# make only gpu 0 visible
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 if __name__ == "__main__":
     # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_2048/checkpoint-320")
     # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_2048")
@@ -352,17 +358,17 @@ if __name__ == "__main__":
     #                     #   model_instance=model
     #             )
     # evaluator.evaluate()
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification
-    
-    reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_lr_3e-05_graded_ranknet/checkpoint-858")
-    tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_lr_3e-05_graded_ranknet")
+
+    # from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_lr_3e-05_graded_ranknet/checkpoint-858")
+    # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_lr_3e-05_graded_ranknet")
     evaluator = Evaluator(ds="legal",
-                          model_name="bm25",
+                          model_name="bge-sliding",
                           metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
                           model_instance=None,
-                          rerank=True,
-                          tokenizer=tokenizer,
-                          reranker_model=reranker_model
+                          rerank=False,
+                        #   tokenizer=tokenizer,
+                        #   reranker_model=reranker_model
                 )
     evaluator.evaluate()
 
