@@ -1,0 +1,48 @@
+import sys
+sys.path.append("home/leon/tesis/messirve-ir")
+from config.config import STORAGE_DIR
+from pathlib import Path
+import pandas as pd
+
+
+def get_doc_from_corpus(docid, corpus_path):
+    """
+    Get the document text from the corpus given its docid.
+    """
+    # Load the corpus
+    corpus = pd.read_csv(corpus_path)
+
+    # conver Codigo column to string
+    corpus["Codigo"] = corpus["Codigo"].astype(str)
+    
+    # Find the document with the given docid
+    doc = corpus[corpus["Codigo"] == str(docid)]
+    
+    if doc.empty:
+        return None
+    
+    return doc.iloc[0]["text"]
+
+
+def main():
+    # Define the path to the corpus
+    corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_py.csv"
+    
+    # Check if the corpus file exists
+    if not corpus_path.exists():
+        print(f"Corpus file not found: {corpus_path}")
+        return
+    
+    # Example docid to search for
+    docid = "48182"
+    
+    # Get the document text
+    doc_text = get_doc_from_corpus(docid, corpus_path)
+    
+    if doc_text:
+        print(f"Document text for docid {docid}:\n{doc_text}")
+    else:
+        print(f"No document found for docid {docid}")
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,30 @@
+# conf/config.yaml
+model_checkpoint: "mrm8488/legal-longformer-base-8192-spanish"
+num_labels: 4
+hyperparameters:
+  epochs: 8
+  batch_size: 4
+  weight_decay: 0.01
+  learning_rate: 2e-5
+  warmup_ratio: 0.1
+  metric_for_best_model: "eval_pairwise_accuracy"
+  early_stopping_patience: 6
+  max_length: 2048
+  output_dir: "/media/discoexterno/leon/legal_ir/results/cross_encoder_fine_2048_ranknet_GPT_cleaned_hydra"
+  loss_type: "ranknet"   # Options: "weighted", "focal", "ranknet", "graded ranknet"
+  gradient_accumulation_steps: 4
+  corpus_type: "cleaned"  # Options: "original", "cleaned"
+
+defaults:
+  - _self_
+  - override hydra/launcher: joblib
+
+hydra:
+  launcher:
+    n_jobs: 1
+  sweeper:
+    params:
+      hyperparameters.learning_rate: 1e-5, 2e-5, 3e-5
+      # hyperparameters.max_seq_length: 2048, 4196
+      # hyperparameters.corpus_type: original, cleaned
+      # checkpoint: "sentence-transformers/distiluse-base-multilingual-cased-v1", "mrm8488/legal-longformer-base-8192-spanish"
