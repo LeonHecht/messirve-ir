@@ -72,3 +72,27 @@ BatchAPI_requests/*
 data/processed/
 
 print_project_structure.py
+
+# Ignore model checkpoint files
+*.pt
+*.bin
+*.safetensors
+*.ckpt
+*.h5
+
+# Ignore optimizer and training state files
+*.optimizer
+*.scheduler
+*.pkl
+*.pickle
+
+# Ignore hidden system files
+.DS_Store
+Thumbs.db
+
+# Ignore output folders
+__pycache__/
+.ipynb_checkpoints/
+checkpoints/
+models/
+outputs/
