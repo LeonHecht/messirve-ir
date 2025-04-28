@@ -5,9 +5,35 @@ import random
 import json
 from pathlib import Path
 from rank_bm25 import BM25Okapi
-
+from tqdm import tqdm
+import os
 import sys
-sys.path.append("home/leon/tesis/messirve-ir")
+
+def configure_python_path():
+    """
+    Add the project root directory to sys.path.
+
+    This function finds the directory two levels up from this file
+    (the repo root) and inserts it at the front of sys.path so that
+    `config.config` can be imported without errors.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    project_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir)
+    )
+    print(f"Adding {project_root} to sys.path")
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+configure_python_path()
+
 from config.config import STORAGE_DIR
 from src.utils.retrieval_utils import get_legal_dataset
 
@@ -19,12 +45,15 @@ def load_qids(path):
 
 def build_ce_dataset(
     qrels_path: str,
+    pos_labels: list,
+    neg_labels: list,
     corpus_path: str,
     queries_path: str,
     output_path: str,
     qid_filter: set = None,
     neg_ratio: int = 6,
-    med_cap: int = 1,
+    med_cap: int = 3,
+    med_offset: int = 10,
     med_top_k: int = 150,
     seed: int = 42,
 ) -> pd.DataFrame:
@@ -71,13 +100,13 @@ def build_ce_dataset(
         names=["qid", "run", "doc_id", "label"]
     )
     positives = (
-        df_q[df_q.label.isin([2, 3])]
+        df_q[df_q.label.isin(pos_labels)]
         .groupby("qid")["doc_id"]
         .apply(list)
         .to_dict()
     )
     annotated_negs = (
-        df_q[df_q.label.isin([0, 1])]
+        df_q[df_q.label.isin(neg_labels)]
         .groupby("qid")["doc_id"]
         .apply(list)
         .to_dict()
@@ -88,16 +117,23 @@ def build_ce_dataset(
     # corpus is a mapping of doc_id -> full document text
     corpus = {doc_id: doc for doc_id, doc in zip(doc_ids, docs)}
     
-    tokenized_docs = [corpus[d].split() for d in doc_ids]
+    tokenized_docs = [corpus[d].split() for d in tqdm(doc_ids, desc="Tokenizing corpus")]
+    print("Building BM25 index...")
     bm25 = BM25Okapi(tokenized_docs)
+    print("BM25 index built.")
 
     # 3) Load queries
-    df_queries = pd.read_csv(queries_path)
-    query_dict = dict(zip(df_queries.topic_id, df_queries.Query))
+    if queries_path.endswith(".tsv"):
+        df_queries = pd.read_csv(queries_path, sep="\t", header=None)
+    elif queries_path.endswith(".csv"):
+        df_queries = pd.read_csv(queries_path)
+    else:
+        raise ValueError(f"Unsupported file format: {queries_path}")
+    query_dict = dict(zip(df_queries.iloc[:, 0], df_queries.iloc[:, 1]))
 
     rows = []
 
-    for qid, q_text in query_dict.items():
+    for qid, q_text in tqdm(query_dict.items(), desc="Processing queries"):
         if qid_filter and qid not in qid_filter:
             continue
         pos_list = positives.get(qid, [])
@@ -128,7 +164,7 @@ def build_ce_dataset(
             ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
             med_candidates = [
                 doc_ids[i]
-                for i in ranked[:med_top_k]
+                for i in ranked[med_offset:med_offset + med_top_k]
                 if doc_ids[i] not in pos_list and doc_ids[i] not in hard_used
             ]
             m_needed = min(med_cap * len(pos_list), rem)
@@ -193,9 +229,10 @@ def main_create_scenario_datasets():
       S4: query‑wise split, annotated + extras at 2× and 3×
     """
     base = Path(STORAGE_DIR) / "legal_ir" / "data"
-    ann  = base / "annotations" / "qrels_py.tsv"
+    # ann  = base / "annotations" / "qrels_py.tsv"
+    ann  = base / "annotations" / "inpars_mistral-small-2501_qrels.tsv"
     corp = base / "corpus" / "corpus_py.csv"
-    qry  = base / "corpus" / "queries_57.csv"
+    qry  = base / "corpus" / "inpars_mistral-small-2501_queries.tsv"
     out  = base / "datasets" / "cross_encoder"
     out.mkdir(parents=True, exist_ok=True)
 
@@ -248,17 +285,19 @@ def main_create_scenario_datasets():
     #             seed=seed
     #         )
     
-    train_qids = load_qids(base / "qids_train.txt")
-    dev_qids   = load_qids(base / "qids_dev.txt")
-    test_qids  = load_qids(base / "qids_test.txt")
+    train_qids = load_qids(base / "qids_inpars_train.txt")
+    dev_qids   = load_qids(base / "qids_inpars_dev.txt")
+    test_qids  = load_qids(base / "qids_inpars_test.txt")
     for split_name, qids in [("train", train_qids), ("dev", dev_qids), ("test", test_qids)]:
         build_ce_dataset(
             qrels_path=str(ann),
+            pos_labels=[1],
+            neg_labels=[0],
             corpus_path=str(corp),
             queries_path=str(qry),
-            output_path=str(out / f"bce_2x_{split_name}.tsv"),
+            output_path=str(out / f"bce_6x_inpars_{split_name}.tsv"),
             qid_filter=qids,
-            neg_ratio=2,
+            neg_ratio=6,
             seed=seed
         )
 

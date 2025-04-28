@@ -431,6 +431,42 @@ def create_qrels_from_response(in_path, out_path):
             f.write(f"{query_id}\t0\t{doc_id}\t{label}\t{evidence}\n")
 
 
+def create_qrels_from_inpars_response(in_path, out_path_queries, out_path_qrels):
+    with open(in_path, 'r', encoding='utf-8') as f:
+        response = json.load(f)
+    
+    # Write to qrels file
+    with open(out_path_queries, 'w', encoding='utf-8') as f_queries, open(out_path_qrels, 'w', encoding='utf-8') as f_qrels:
+        for doc_id, queries in response.items():
+            # if not queries.strip().endswith('"]'):
+            #     print(f"queries before appending ']' for doc_id {doc_id}: {queries}")
+            #     queries += '"]'
+            #     print(f'Appended "] to queries for doc_id {doc_id}.')
+            # Parse the queries
+            try:
+                queries = json.loads(queries)
+            except json.JSONDecodeError as e:
+                print(f"Error decoding JSON for doc_id {doc_id}: {e}")
+                print(f"Error decoding JSON for custom_id {doc_id}: {queries}")
+                continue
+            
+            assert isinstance(queries, list), (
+                f"Value for doc_id '{doc_id}' is not a list after parsing."
+            )
+            assert len(queries) >= 3, (
+                f"Expected min. 3 elements for doc_id '{doc_id}', but got {len(queries)}."
+            )
+            
+            for i, query in enumerate(queries):
+                qid = f"{doc_id}_Q{i+1}"
+                # Write to qrels file
+                f_queries.write(f"{qid}\t{query}\n")
+                # Write to qrels file (qid  0   doc_id  label)
+                f_qrels.write(f"{qid}\t0\t{doc_id}\t1\n")
+
+    print(f"Queries written to {out_path_queries} and qrels written to {out_path_qrels}")
+
+
 def load_and_write_to_file(in_path, out_path):
     """Read JSON file containing responses from ChatGPT Batch API and write a specific response as plain text,
     ensuring that newline characters become actual line breaks.
@@ -473,12 +509,18 @@ def create_new_corpus(filename):
 
 if __name__ == "__main__":
     # requests = create_jsonl_annotation_mistral()
-    requests = create_jsonl_inpars_mistral()
+    # requests = create_jsonl_inpars_mistral()
 
     # process_response_file(
-    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "annotation_57_mistral-large-2411_v7.jsonl",
-    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "annotation_57_mistral-large-2411_v7_processed.json"
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "inpars_mistral-small-2501.jsonl",
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "inpars_mistral-small-2501_processed.json"
     # )
+
+    create_qrels_from_inpars_response(
+        in_path=Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "inpars_mistral-small-2501_processed.json",
+        out_path_queries=Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "inpars_mistral-small-2501_queries.tsv",
+        out_path_qrels=Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "inpars_mistral-small-2501_qrels.tsv"
+    )
 
     # create_qrels_from_response(
     #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "annotation_57_mistral-large-2411_v7_processed.json",
