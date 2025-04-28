@@ -29,7 +29,8 @@ from src.utils.retrieval_utils import (
     get_sim_bge,
     chunk_by_paragraphs,
     embed_bge_sparse,
-    embed_bge_sliding_window
+    embed_bge_sliding_window,
+    rerank_cross_encoder_chunked
 )
 
 from src.utils.train_utils import (
@@ -65,7 +66,7 @@ class Evaluator:
         reranker_model : object, optional
             Reranker model instance.
     """
-    def __init__(self, ds, model_name, metric_names, limit=None, reuse_run=False, model_instance=None, rerank=False, tokenizer=None, reranker_model=None, reranker_model_type=None):
+    def __init__(self, ds, model_name, metric_names, limit=None, reuse_run=False, model_instance=None, rerank=False, tokenizer=None, reranker_model=None, reranker_model_type=None, max_length=-1, rerank_chunkwise=False):
         self.ds = ds
         self.model_name = model_name
         self.metric_names = metric_names
@@ -76,6 +77,8 @@ class Evaluator:
         self.tokenizer = tokenizer
         self.reranker_model = reranker_model
         self.reranker_model_type = reranker_model_type
+        self.max_length = max_length
+        self.rerank_chunkwise = rerank_chunkwise
 
         self.device = torch.device("cuda:0")
         self.docs = None
@@ -230,8 +233,12 @@ class Evaluator:
     def rerank_run(self):
         # self.write_run_to_tsv(qid="1", out_path="run_Q1_before.tsv")
         # for each query rerank the top 100 docs
-        self.run = rerank_cross_encoder(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 30, self.query_dict, self.doc_dict,
-                                max_length=2048)
+        if self.rerank_chunkwise:
+            self.run = rerank_cross_encoder_chunked(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 30, self.query_dict, self.doc_dict,
+                                                    max_length=self.max_length, stride=self.max_length//2, aggregator="top3")
+        else:
+            self.run = rerank_cross_encoder(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 30, self.query_dict, self.doc_dict,
+                                    max_length=self.max_length)
         self.write_run_to_tsv(qid="1", out_path="run_Q1_after.tsv")
 
     def get_metrics(self):
@@ -380,7 +387,7 @@ if __name__ == "__main__":
                           rerank=True,
                         #   tokenizer=tokenizer,
                         #   reranker_model=reranker_model,
-                        reranker_model_type="bge"
+                          reranker_model_type="bge"
                 )
     evaluator.evaluate()
 

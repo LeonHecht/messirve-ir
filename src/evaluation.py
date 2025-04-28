@@ -1,6 +1,5 @@
 import sys
 print("Executable: ", sys.executable)
-from models import model_setup
 from datasets import load_dataset
 import pandas as pd
 import pickle
@@ -37,6 +36,7 @@ from utils.train_utils import (
 from config.config import STORAGE_DIR
 
 from models.model_setup import get_bge_m3_model, get_jinja_model
+from models import model_setup
 
 
 def get_messirve_corpus(country):

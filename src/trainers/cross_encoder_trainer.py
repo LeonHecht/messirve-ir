@@ -1,4 +1,6 @@
 import os
+# make only gpu1 visible
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import logging
 import numpy as np
 import math
@@ -18,9 +20,6 @@ import json
 import uuid
 import pandas as pd
 import sys
-
-# make only gpu1 visible
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 
 def configure_python_path():
@@ -344,9 +343,9 @@ class CrossEncoderTrainer:
             logging_steps=20,
 
             evaluation_strategy="steps",
-            eval_steps=290,
+            eval_steps=1000,
             save_strategy="steps",
-            save_steps=290,
+            save_steps=1000,
 
             load_best_model_at_end=True,
             metric_for_best_model=self.hyperparameters.get("metric_for_best_model", "eval_f1"),
@@ -471,7 +470,8 @@ class CrossEncoderTrainer:
         self.doc_dict = docid_to_text
 
         # open queries_57.csv with pandas
-        queries = pd.read_csv(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_53.csv"), usecols=["topic_id", "Query"])
+        # queries = pd.read_csv(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_53.csv"), usecols=["topic_id", "Query"])
+        queries = pd.read_csv(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "inpars_mistral-small-2501_queries.tsv"), header=None, sep="\t", names=["topic_id", "Query"])
         # convert topic_id column to string
         queries["topic_id"] = queries["topic_id"].astype(str)
 
@@ -538,6 +538,10 @@ class CrossEncoderTrainer:
 
         ds = Dataset.from_pandas(df)
 
+        # cut ds to half
+        # ds = ds.select(range(len(ds)//10))
+        ds = ds.select(range(200))
+
         # map IDs to text
         def map_ids(ex):
             ex["query"] = self.query_dict[ex["qid"]]
@@ -559,7 +563,7 @@ class CrossEncoderTrainer:
         if self.hyperparameters["use_stride"] == True:
             ds = ds.map(self.tokenize_with_stride, batched=True, remove_columns=["qid", "doc_id", "query", "doc", "label"])
         else:
-            ds = ds.map(tokenize, batched=True, remove_columns=["qid", "doc_id", "query", "doc", "label"])
+            ds = ds.map(tokenize, batched=True, num_proc=4, remove_columns=["qid", "doc_id", "query", "doc", "label"])
 
         # shuffle the entire dataset
         seed = self.hyperparameters.get("seed", 42)
@@ -795,40 +799,41 @@ class CrossEncoderTrainer:
         self.trainer.train()
 
     def evaluate_classification(self, test_dataset):
-        """
-        Evaluate the model on a test dataset and print a classification report.
-
-        Parameters
-        ----------
-        test_dataset : Dataset
-            The test dataset.
-
-        Returns
-        -------
-        dict
-            Evaluation results from the Trainer.
-        """
         self.logger.info("Evaluating on test dataset...")
         output = self.trainer.predict(test_dataset)
         logits = output.predictions
         if isinstance(logits, (tuple, list)):
             logits = logits[0]
-        # decide between BCE vs. CE by dimensionality or num_labels
-        if logits.ndim == 1 or logits.shape[-1] == 1:
-            # binary case: logits shape (N,) or (N,1)
-            flat = logits.squeeze(-1)
-            probs = 1 / (1 + np.exp(-flat))      # sigmoid
-            preds = (probs > 0.5).astype(int)
-        else:
-            # multi-class case
-            preds = np.argmax(logits, axis=-1)
 
-        # get the true labels as an array
+        # ── decide BCE vs CE by shape ──────────────────────────────────
+        if logits.ndim == 1:
+            # already flat: shape (N,)
+            flat = logits
+        elif logits.ndim == 2 and logits.shape[1] == 1:
+            # squeezed logit: shape (N,1)
+            flat = logits[:, 0]
+        else:
+            # multi-class: shape (N, C)
+            preds = np.argmax(logits, axis=-1)
+            labels = (output.label_ids 
+                    if hasattr(output, "label_ids") 
+                    else np.array(test_dataset["labels"]))
+            target_names = [f"Class {i}" for i in range(self.num_labels)]
+            report = classification_report(labels, preds, target_names=target_names)
+            self.logger.info("\n" + report)
+            return output.metrics
+
+        # ── binary case: sigmoid + threshold ──────────────────────────
+        probs = 1 / (1 + np.exp(-flat))      # sigmoid
+        preds = (probs > 0.5).astype(int)
+
+        # ── true labels ───────────────────────────────────────────────
         labels = (output.label_ids 
                 if hasattr(output, "label_ids") 
                 else np.array(test_dataset["labels"]))
 
-        target_names = [f"Class {i}" for i in range(self.num_labels)]
+        n_classes = len(np.unique(labels))
+        target_names = [f"Class {i}" for i in range(n_classes)]
         report = classification_report(labels, preds, target_names=target_names)
         self.logger.info("\n" + report)
         return output.metrics
@@ -922,7 +927,7 @@ def main():
     # model_checkpoint = "mrm8488/legal-longformer-base-8192-spanish"
     model_checkpoint = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
     hyperparameters = {
-        "epochs": 20,
+        "epochs": 1,
         "batch_size": 64,
         "weight_decay": 0.01,
         "learning_rate": 3e-5,  # placeholder; will be overridden
@@ -1006,10 +1011,9 @@ def main():
             #     max_length=hyperparameters["max_length"]
             # )
 
-            # Version for training on balanced annotations (Negatives aggregated via BM25):
-            ds_train_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_2x_train.tsv")
-            ds_dev_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_2x_dev.tsv")
-            ds_test_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_2x_test.tsv")
+            ds_train_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_6x_inpars_train.tsv")
+            ds_dev_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_6x_inpars_dev.tsv")
+            ds_test_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_6x_inpars_test.tsv")
             
             train_ds = cross_encoder.load_tsv_dataset(ds_train_path, max_length=hyperparameters["max_length"])
             val_ds = cross_encoder.load_tsv_dataset(ds_dev_path, max_length=hyperparameters["max_length"])
@@ -1058,6 +1062,8 @@ def main():
             rerank=True,
             reranker_model=cross_encoder.model,
             tokenizer=cross_encoder.tokenizer,
+            max_length=hyperparameters["max_length"],
+            rerank_chunkwise=hyperparameters["use_stride"],
         )
         evaluator.evaluate()
 

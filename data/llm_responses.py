@@ -223,15 +223,13 @@ def make_user_msg(query, mandatory_terms, doc):
     )
 
 
-def create_jsonl_annotation_mistral():
+def create_jsonl_original_annotation_mistral():
     doc_ids, docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_py.csv"))
     query_ids, queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_57.csv"))
 
-    mandatory_list = [make_mandatory_list(query) for query in queries]
+    # mandatory_list = [make_mandatory_list(query) for query in queries]
 
     doc_dict = {str(doc_id): doc for doc_id, doc in zip(doc_ids, docs)}
-
-    print(doc_dict["37854"])
 
     with open(Path("data") / "processed" / "doctag_runs.json", "r") as f:
         doctag_runs = json.load(f)["run"]

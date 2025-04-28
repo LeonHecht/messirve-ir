@@ -1,12 +1,48 @@
-from models.model_setup import get_mamba_model, get_auto_model
-from datasets import load_from_disk
-from trainers.info_nce_trainer import InfoNCERetrievalTrainerHNLLM
+import os
+import unsloth
+import random
+from datasets import load_from_disk, load_dataset
 from transformers import TrainingArguments
 import torch
-from datasets import Dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from datasets import Dataset, concatenate_datasets
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoProcessor
 from unsloth import FastLanguageModel
-from utils.train_utils import (
+from peft import LoraConfig, TaskType, get_peft_model
+import pickle
+import json
+import pandas as pd
+import uuid
+import sys
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+def configure_python_path():
+    """
+    Add the project root directory to sys.path.
+
+    This function finds the directory two levels up from this file
+    (the repo root) and inserts it at the front of sys.path so that
+    `config.config` can be imported without errors.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    project_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
+    )
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+# Apply the path tweak before any project imports
+configure_python_path()
+
+from src.trainers.info_nce_trainer import InfoNCERetrievalTrainerHNLLM
+from config.config import MAX_QUERY_LEN, MAX_DOC_LEN, STORAGE_DIR
+from src.models.model_setup import get_mamba_model, get_auto_model
+from src.utils.train_utils import (
     tokenize_with_hard_negatives_messirve,
     custom_data_collator,
     get_msmarco_queries,
@@ -15,22 +51,91 @@ from utils.train_utils import (
     tokenize_train_ds_msmarco,
     tokenize_test_ds_msmarco
 )
-from peft import LoraConfig, TaskType, get_peft_model
-import pickle
-import src.evaluation as evaluation
-from datasets import load_dataset
-import sys
-print("Executable", sys.executable)
-import json
-import os
-import pandas as pd
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-import random
-
-from config.config import MAX_QUERY_LEN, MAX_DOC_LEN, STORAGE_DIR
+from src.utils.retrieval_utils import (
+    get_legal_dataset,
+    get_legal_queries
+)
+from src.utils.log_experiment import log_csv, log_md, log_plot
+from src.eval_class import Evaluator
 
 print("Max query len:", MAX_QUERY_LEN)
 print("Max doc len:", MAX_DOC_LEN)
+
+
+def log_experiment(trainer, training_args, model_checkpoint, exp_id, dataset_name, loss_name, gpu_name, ir_metrics):
+        """
+        Log experiment details using Markdown, CSV, and plot logging.
+
+        Parameters
+        ----------
+        exp_id : str
+            Experiment identifier.
+        dataset_name : str
+            Name of the dataset used.
+        loss_name : str
+            Name of the loss function used.
+        gpu_name : str
+            Name of the GPU used.
+        ir_metrics : dict
+            Dictionary containing IR metrics (e.g., nDCG, Recall, MRR).
+        """
+        # Retrieve training results from trainer state
+        training_results = trainer.state.log_history
+        # Convert training arguments to a dictionary
+        training_args_dict = training_args.to_dict()
+        # Determine experiment directory from output_dir
+        exp_dir = training_args_dict.get("output_dir", "./results")
+        model_name = model_checkpoint
+
+        # Log Markdown file
+        log_md(exp_dir, exp_id, model_name, dataset_name, loss_name,
+               training_args_dict, gpu_name, training_results, ir_metrics)
+        # Log CSV file
+        log_csv(exp_id, model_name, dataset_name, loss_name,
+                training_args_dict, gpu_name, training_results, ir_metrics)
+        # Log training plot
+        log_plot(exp_dir, exp_id, training_results)
+
+
+def make_dual_encoder_dataset(tsv_path: str,
+                              neg_per_pos: int,
+                              shuffle_negatives: bool = False,
+                              seed: int = 42) -> Dataset:
+
+    # 1. Load raw data
+    df = pd.read_csv(tsv_path, sep="\t", dtype={'qid': str, 'doc_id': str, 'label': int})
+
+    # 2. Build rows for new dataset
+    all_rows = []
+    for qid, sub in df.groupby('qid', sort=False):
+        positives = sub.loc[sub['label']==1, 'doc_id'].tolist()
+        negatives = sub.loc[sub['label']==0, 'doc_id'].tolist()
+
+        # sanity check: must exactly match your provided ratio
+        total_negs = len(negatives)
+        assert total_negs == len(positives) * neg_per_pos, (
+            f"Query {qid} has {len(positives)} positives and "
+            f"{total_negs} negatives; expected {len(positives)*neg_per_pos}"
+        )
+
+        if shuffle_negatives:
+            import random
+            random.seed(seed)
+            random.shuffle(negatives)
+
+        # 3. Partition negatives into contiguous chunks of size neg_per_pos
+        for i, pos in enumerate(positives):
+            start = i * neg_per_pos
+            chunk = negatives[start : start + neg_per_pos]
+            row = {'query': qid, 'positive': pos}
+            for j, neg in enumerate(chunk, start=1):
+                row[f'negative_{j}'] = neg
+            all_rows.append(row)
+
+    # 4. Convert back into a Hugging Face Dataset
+    result_df = pd.DataFrame(all_rows)
+    new_ds = Dataset.from_pandas(result_df, preserve_index=False)
+    return new_ds
 
 
 def train():
@@ -72,96 +177,34 @@ def train():
 
         checkpoint = STORAGE_DIR + "/qwen-2-vec/run_89622_texts_1_epoch/output-model/checkpoint-2500"
     elif which == "legal":
-        # Read corpus and queries
-        corpus = pd.read_csv(
-            os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus_py.csv"),
-            usecols=["Codigo", "text"]
+        train_ds = make_dual_encoder_dataset(
+            tsv_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", "bce_train.tsv"),
+            neg_per_pos=6,
+            shuffle_negatives=False,
         )
-        pid_to_passage = dict(zip(corpus["Codigo"], corpus["text"]))
-        doc_ids = list(corpus["Codigo"])
-
-        queries = pd.read_csv(
-            os.path.join(STORAGE_DIR, "legal_ir", "data", "queries_57.csv"),
-            usecols=["topic_id", "Query"]
+        dev_ds = make_dual_encoder_dataset(
+            tsv_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", "bce_dev.tsv"),
+            neg_per_pos=6,
+            shuffle_negatives=False,
         )
-        qid_to_query = dict(zip(queries["topic_id"], queries["Query"]))
-
-        # Read qrels
-        with open(os.path.join(STORAGE_DIR, "legal_ir", "data", "qrels_py.tsv"), "r") as f:
-            qrels = f.readlines()
-
-        # Build dataset dictionary with positives and negatives for each query
-        ds = {}
-        num_negs = 5
-
-        for row in qrels:
-            row = row.split("\t")
-            row[-1] = row[-1].replace("\n", "")
-            row = [int(val) for val in row]
-            curr_query = row[0]
-            if curr_query not in ds:
-                ds[curr_query] = {"positives": [], "negatives": []}
-
-            if row[-1] == 2 or row[-1] == 3:
-                ds[curr_query]["positives"].append(row[2])
-            elif row[-1] == 0 or row[-1] == 1:
-                ds[curr_query]["negatives"].append(row[2])
-
-        # Ensure each query has at least 5 negatives (filling with random ones if needed)
-        for qid, doc_dict in ds.items():
-            if len(doc_dict["negatives"]) < 5:
-                for _ in range(5 - len(doc_dict["negatives"])):
-                    neg = doc_ids[0]
-                    while neg in doc_dict["negatives"]:
-                        neg = doc_ids[random.randint(0, len(doc_ids) - 1)]
-                    doc_dict["negatives"].append(neg)
-
-        # Build the final dataset as a list of dictionaries
-        dataset = []
-        for qid, doc_dict in ds.items():
-            for pos in doc_dict["positives"]:
-                record = {"query": qid, "positive": pos}
-                for n, neg in enumerate(doc_dict["negatives"]):
-                    if n == num_negs:
-                        break
-                    record[f"negative_{n+1}"] = neg
-                dataset.append(record)
-
-        # --- Query-level split --- #
-        # 1. Get unique queries from the dataset
-        unique_queries = list({entry["query"] for entry in dataset})
-        # 2. Shuffle and split unique queries (e.g., 70% train, 30% test)
-        random.seed(42)
-        random.shuffle(unique_queries)
-        split_index = int(0.7 * len(unique_queries))
-        train_queries = set(unique_queries[:split_index])
-        test_queries = set(unique_queries[split_index:])
-
-        # 3. Filter dataset entries by query membership
-        train_data = [entry for entry in dataset if entry["query"] in train_queries]
-        test_data = [entry for entry in dataset if entry["query"] in test_queries]
-
-        # Optionally, write out each split as TSV files
-        train_df = pd.DataFrame(train_data)
-        test_df = pd.DataFrame(test_data)
-        train_df.to_csv(
-            os.path.join(STORAGE_DIR, "legal_ir", "data", "train_dataset.tsv"),
-            sep="\t",
-            index=False
+        
+        test_ds = make_dual_encoder_dataset(
+            tsv_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", "bce_test.tsv"),
+            neg_per_pos=6,
+            shuffle_negatives=False,
         )
-        test_df.to_csv(
-            os.path.join(STORAGE_DIR, "legal_ir", "data", "test_dataset.tsv"),
-            sep="\t",
-            index=False
-        )
+        test_ds = concatenate_datasets([dev_ds, test_ds])
 
-        # Load splits into Hugging Face Dataset objects if needed:
-        train_ds = Dataset.from_pandas(train_df)
-        test_ds = Dataset.from_pandas(test_df)
+        # train_ds = train_ds.select(range(100))
+        # test_ds = test_ds.select(range(100))
 
-        # Save datasets to disk
-        train_ds.save_to_disk(os.path.join(STORAGE_DIR, "legal_ir", "data", "train_ds"))
-        test_ds.save_to_disk(os.path.join(STORAGE_DIR, "legal_ir", "data", "test_ds"))
+        query_ids, queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_57.csv"))
+        qid_to_query = {query_id: query for query_id, query in zip(query_ids, queries)}
+
+        doc_ids, docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_py.csv"))
+        pid_to_passage = {doc_id: doc for doc_id, doc in zip(doc_ids, docs)}
+
+        num_negs = 6
     else:
         raise ValueError("Dataset not supported")
     # if 'helga_g' in STORAGE_DIR:
@@ -182,6 +225,7 @@ def train():
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
     else:
+        checkpoint = "unsloth/Qwen2.5-0.5B-Instruct"
         model, tokenizer = FastLanguageModel.from_pretrained(
             # Can select any from the below:
             # "unsloth/Qwen2.5-0.5B", "unsloth/Qwen2.5-1.5B", "unsloth/Qwen2.5-3B"
@@ -189,8 +233,8 @@ def train():
             # And also all Instruct versions and Math. Coding verisons!
             model_name = "unsloth/Qwen2.5-0.5B-Instruct",
             max_seq_length = MAX_DOC_LEN,
-            dtype = "bf16",
-            load_in_4bit = False,
+            # dtype = torch.bfloat16,
+            load_in_4bit = True,
             # device_map="cuda:1",
             # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
         )
@@ -207,7 +251,7 @@ def train():
             lora_dropout = 0, # Supports any, but = 0 is optimized
             bias = "none",    # Supports any, but = "none" is optimized
             # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
-            # use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
+            use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
             random_state = 3407,
             use_rslora = True,  # We support rank stabilized LoRA
             loftq_config = None, # And LoftQ
@@ -225,12 +269,12 @@ def train():
         raise ValueError("Dataset not supported")
 
     # output_dir = os.path.join(STORAGE_DIR, "ms_marco_passage", "results", "IR_unsloth_qwen0.5_5negs_rslora_50k_SFT_GPT")
-    output_dir = os.path.join(STORAGE_DIR, "legal_ir", "results", "test_py")
+    output_dir = os.path.join(STORAGE_DIR, "legal_ir", "results", "legal_eos_dual_test")
     print("Output dir:", output_dir)
 
     batch_size = 2
     gradient_accumulation_steps = 4
-    epochs = 4
+    epochs = 10
 
     # Compute total steps given your dataset and hyperparameters
     total_steps = (len(train_ds) // (batch_size * gradient_accumulation_steps)) * epochs
@@ -243,25 +287,27 @@ def train():
         eval_steps=eval_steps,                  # Evaluate every 500 steps
         learning_rate=5e-4,              # Learning rate
         per_device_train_batch_size=batch_size,  # Batch size for training
-        per_device_eval_batch_size=batch_size,   # Batch size for evaluation
+        per_device_eval_batch_size=1,   # Batch size for evaluation
         gradient_accumulation_steps=gradient_accumulation_steps,
         num_train_epochs=epochs,              # Number of epochs
         weight_decay=0.01,               # Weight decay
-        max_grad_norm=30,                # Maximum gradient norm
+        max_grad_norm=20,                # Maximum gradient norm
         save_strategy="steps",           # Save model checkpoints at the end of each epoch
         save_steps=eval_steps,                  # Save checkpoints every 500 stepss
         logging_dir="./logs",            # Directory for logs
-        logging_steps=2,                # Log every 10 steps
+        logging_steps=20,                # Log every 10 steps
         save_total_limit=1,              # Save only the last checkpoint
         remove_unused_columns=False,
         warmup_ratio=0.1,
         fp16=False,
-        bf16=True,
+        bf16=False,
         # gradient_checkpointing=True,
         # optim = "adamw_8bit",
     )
 
     training_args.dataset_kwargs = {"skip_prepare_dataset": True}
+
+    processor = AutoProcessor.from_pretrained(checkpoint)
 
     # Create Trainer Instance
     trainer = InfoNCERetrievalTrainerHNLLM(
@@ -269,7 +315,8 @@ def train():
         args=training_args,
         train_dataset=train_ds,     # Raw dataset for training
         eval_dataset=test_ds,       # Raw dataset for evaluation
-        tokenizer=tokenizer,             # Tokenizer for on-the-fly tokenization
+        # tokenizer=tokenizer,             # Tokenizer for on-the-fly tokenization
+        processing_class = processor,
         data_collator=custom_data_collator,     # Handles dynamic padding and tokenization
     )
 
@@ -285,7 +332,34 @@ def train():
     torch.save(trainer.state.log_history, os.path.join(output_dir, "training_metrics_hf.pth"))
     tokenizer.save_pretrained(os.path.join(output_dir, "saved_model"))
 
-    evaluation.run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, ds="legal", model_instance=model, tokenizer=tokenizer, reuse_run=False)
+    # evaluation.run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, ds="legal", model_instance=model, tokenizer=tokenizer, reuse_run=False)
+
+    # Evaluate IR metrics.
+    evaluator = Evaluator(
+        ds="legal",
+        model_name="qwen",
+        metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
+        rerank=False,
+        model_instance=model,
+        tokenizer=tokenizer,
+        reuse_run=False,
+    )
+    evaluator.evaluate()
+
+    ir_metrics = {
+        "ndcg": evaluator.metrics["ndcg"],
+        "ndcg_cut_10": evaluator.metrics["ndcg_cut_10"],
+        "recall_1000": evaluator.metrics["recall_1000"],
+        "recall_100": evaluator.metrics["recall_100"],
+        "recall_10": evaluator.metrics["recall_10"],
+        "recip_rank": evaluator.metrics["recip_rank"],
+    }
+
+    gpu_name = "RTX A5000"
+    exp_id = "exp_" + uuid.uuid4().hex[:8]
+    dataset_name = "bce_ds"
+    loss_name = "InfoNCE"
+    log_experiment(trainer, training_args, checkpoint, exp_id, dataset_name, loss_name, gpu_name, ir_metrics)
 
 if __name__ == "__main__":
     train()

@@ -761,7 +761,8 @@ def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
             embeddings_docs.append(doc_embeds)
     embeddings_docs = torch.cat(embeddings_docs, dim=0)  # Combine batches
 
-    run = compute_similarity(query_ids, doc_ids, embeddings_queries, embeddings_docs)
+    similarity = compute_similarity(embeddings_queries, embeddings_docs)
+    run = retrieve(query_ids, doc_ids, similarity)
     return run
 
 
@@ -1323,7 +1324,125 @@ def merge_reranked_into_full_run(full_run, reranked_run):
     return merged_run
 
 
-import random
+def rerank_cross_encoder_chunked(model,
+                                 model_type,
+                                 tokenizer,
+                                 run,
+                                 top_k,
+                                 query_dict,
+                                 doc_dict,
+                                 max_length,
+                                 stride,
+                                 aggregator="max",
+                                 batch_size=8):
+    """
+    Rerank the provided run using a cross-encoder with sliding-window chunking.
+
+    This function splits each document into overlapping chunks using the
+    tokenizer's `return_overflowing_tokens` feature, scores each chunk,
+    aggregates the chunk scores into a single document-level score, and
+    merges the reranked scores back into the full run.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        The trained cross-encoder model (or placeholder for BGE/SBERT).
+    model_type : str
+        One of ['binary', 'fine_grained', 'ranknet', 'bge', 'sbert'].
+    tokenizer : transformers.PreTrainedTokenizer
+        Corresponding tokenizer.
+    run : dict
+        Initial retrieval run mapping query_id → {doc_id: score}.
+    top_k : int
+        Number of top candidates to keep per query.
+    query_dict : dict
+        Mapping from query_id → query text.
+    doc_dict : dict
+        Mapping from doc_id → full document text.
+    max_length : int
+        Maximum token length per chunk.
+    stride : int
+        Number of overlapping tokens between chunks.
+    aggregator : {'max', 'mean'}, optional
+        How to aggregate chunk scores into one document score.
+        Default is 'max'.
+    batch_size : int, optional
+        Batch size for scoring chunks. Default is 8.
+
+    Returns
+    -------
+    dict
+        Merged run mapping each query_id → {doc_id: aggregated_score}.
+    """
+    # instantiate or prepare model exactly as in your normal reranker
+    if model_type == "bge":
+        from FlagEmbedding import FlagLLMReranker
+        model = FlagLLMReranker('BAAI/bge-reranker-v2-gemma', use_bf16=True)
+    elif model_type == "sbert":
+        from sentence_transformers import CrossEncoder
+        model = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device)
+        model.eval()
+
+    # limit to top_k candidates per query
+    limited_run = {
+        qid: dict(sorted(run[qid].items(), key=lambda x: x[1], reverse=True)[:top_k])
+        for qid in run
+    }
+
+    scorer = CrossEncoderScorer(model, tokenizer, head_type=model_type)
+    reranked = {}
+
+    for qid, doc_scores in tqdm(limited_run.items(), total=len(limited_run)):
+        query_text = query_dict[qid]
+        reranked[qid] = {}
+
+        for doc_id in doc_scores:
+            full_text = doc_dict[str(doc_id)]
+            # tokenize with overlapping windows
+            encoding = tokenizer(
+                query_text,
+                full_text,
+                truncation=True,
+                padding="max_length",
+                return_overflowing_tokens=True,
+                max_length=max_length,
+                stride=stride,
+                return_tensors="pt"
+            )
+            input_ids = encoding["input_ids"]
+            chunks = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+
+            # score each chunk
+            chunk_scores = []
+            for i in range(0, len(chunks), batch_size):
+                batch_chunks = chunks[i:i + batch_size]
+                batch_queries = [query_text] * len(batch_chunks)
+                scores = scorer.score(batch_queries, batch_chunks, max_length=max_length)
+                # ensure list
+                if isinstance(scores, (float, int)):
+                    chunk_scores.append(scores)
+                else:
+                    chunk_scores.extend(scores)
+
+            # aggregate chunk scores
+            if aggregator == "max":
+                agg_score = max(chunk_scores)
+            elif aggregator == "mean":
+                agg_score = sum(chunk_scores) / len(chunk_scores)
+            elif aggregator == "top3":
+                top_scores = sorted(chunk_scores, reverse=True)[:3]
+                agg_score = sum(top_scores) / len(top_scores)
+            else:
+                raise ValueError(f"Unknown aggregator: {aggregator}")
+
+            reranked[qid][doc_id] = float(agg_score)
+
+    return merge_reranked_into_full_run(run, reranked)
+
+
 def rerank_cross_encoder(model, model_type, tokenizer, run, top_k, query_dict, doc_dict, max_length, batch_size=8):
     """
     Rerank the provided run using a cross-encoder scorer. This function creates a 
@@ -1541,8 +1660,11 @@ def get_legal_dataset(path):
 
 
 def get_legal_queries(path):
-    # Load the queries
-    df = pd.read_csv(path, usecols=["topic_id", "Query"])
+    if path.endswith(".csv"):
+        # Load the queries
+        df = pd.read_csv(path, usecols=["topic_id", "Query"])
+    elif path.endswith(".tsv"):
+        df = pd.read_csv(path, sep="\t", header=None, names=["topic_id", "Query"])
     # convert topic_id column to list
     df["topic_id"] = df["topic_id"].astype(str)
     return df["topic_id"].tolist(), df["Query"].tolist()

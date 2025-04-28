@@ -53,15 +53,59 @@ def tsv_to_json(tsv_path, json_path):
         json.dump(mapping, json_out, ensure_ascii=False, indent=2)
 
 
+def json_to_tsv(json_path: str,
+                tsv_path: str,
+                topic_id_col: str = 'topic_id',
+                query_col: str = 'Query') -> None:
+    """
+    Convert a JSON mapping of topic_id → query into a TSV file.
+
+    Reads a JSON file where each key is a topic ID (int or str) and each
+    value is the corresponding query string, then writes a TSV with two
+    columns.
+
+    Parameters
+    ----------
+    json_path : str
+        Path to the input JSON file.
+    tsv_path : str
+        Path where the output TSV file will be saved.
+    topic_id_col : str, optional
+        Column name for topic IDs in the TSV (default: 'topic_id').
+    query_col : str, optional
+        Column name for query strings in the TSV (default: 'Query final').
+
+    Returns
+    -------
+    None
+    """
+    # Load the JSON mapping
+    with open(json_path, 'r', encoding='utf-8') as json_in:
+        mapping = json.load(json_in)
+
+    # Ensure parent directory exists
+    out_path = Path(tsv_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write the TSV
+    with open(out_path, 'w', encoding='utf-8', newline='') as tsv_out:
+        writer = csv.writer(tsv_out, delimiter='\t')
+        writer.writerow([topic_id_col, query_col])
+        for tid, query in sorted(mapping.items(), key=lambda x: int(x[0])):
+            writer.writerow([tid, query])
+
+
 def main():
     """
     Main entry point.
 
     Parses arguments and converts the TSV to JSON.
     """
-    in_file = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "anotacion_consultas_sinteticas.tsv"
-    out_file = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "consultas_sinteticas_393.json"
-    tsv_to_json(in_file, out_file)
+    # in_file = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "anotacion_consultas_sinteticas.tsv"
+    in_file = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "consultas_sinteticas_380.json"
+    out_file = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "consultas_sinteticas_380.tsv"
+    json_to_tsv(in_file, out_file)
+    # tsv_to_json(in_file, out_file)
     print(f"Converted {in_file} to {out_file}")
 
 

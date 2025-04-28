@@ -1,7 +1,7 @@
 import torch
 from transformers import Trainer
 import torch.nn.functional as F
-from utils.train_utils import get_eos_embeddings
+from src.utils.train_utils import get_eos_embeddings
 
 
 class InfoNCERetrievalTrainer(Trainer):
