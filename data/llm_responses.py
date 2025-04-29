@@ -225,13 +225,14 @@ def make_user_msg(query, mandatory_terms, doc):
 
 def create_jsonl_original_annotation_mistral():
     doc_ids, docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_py.csv"))
-    query_ids, queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_57.csv"))
+    # query_ids, queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_57.csv"))
+    query_ids, queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "consultas_sinteticas_380.tsv"), header=0)
 
     # mandatory_list = [make_mandatory_list(query) for query in queries]
 
     doc_dict = {str(doc_id): doc for doc_id, doc in zip(doc_ids, docs)}
 
-    with open(Path("data") / "processed" / "doctag_runs.json", "r") as f:
+    with open(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "llm_annotation_runs.json"), "r") as f:
         doctag_runs = json.load(f)["run"]
     
     # Structure of doctag_runs.json:
@@ -246,7 +247,7 @@ def create_jsonl_original_annotation_mistral():
     #         {
     #           "document_id": "39988"
     #         },
-    qid_range = range(1, 58)
+    qid_range = range(58, 505)
 
     preranked_doc_ids = {}
     for topic in doctag_runs:
@@ -287,11 +288,12 @@ def create_jsonl_original_annotation_mistral():
     
     requests = []
 
-    for qid, query, mand in zip(query_ids, queries, mandatory_list):
+    for qid, query in zip(query_ids, queries):
         for did in preranked_doc_ids[str(qid)]:
             requests.append({
                     "custom_id": f"{str(qid)}_{str(did)}",
                     "body": {
+                        "max_tokens": 256,
                         "messages": [
                             {"role": "system", "content": sys_instruct},
                             {"role": "user",
@@ -307,7 +309,7 @@ def create_jsonl_original_annotation_mistral():
     print(len(requests))
 
     # write requests to jsonl file
-    file_path = f"batch_requests_mistral_v7_sintetic.jsonl"
+    file_path = f"batch_requests_mistral_v7_synthetic.jsonl"
     with open(file_path, "w", encoding="utf-8") as f:
         for request in requests:
             f.write(json.dumps(request, ensure_ascii=False) + "\n")
@@ -506,7 +508,7 @@ def create_new_corpus(filename):
 
 
 if __name__ == "__main__":
-    # requests = create_jsonl_annotation_mistral()
+    requests = create_jsonl_original_annotation_mistral()
     # requests = create_jsonl_inpars_mistral()
 
     # process_response_file(
@@ -514,11 +516,11 @@ if __name__ == "__main__":
     #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "inpars_mistral-small-2501_processed.json"
     # )
 
-    create_qrels_from_inpars_response(
-        in_path=Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "inpars_mistral-small-2501_processed.json",
-        out_path_queries=Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "inpars_mistral-small-2501_queries.tsv",
-        out_path_qrels=Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "inpars_mistral-small-2501_qrels.tsv"
-    )
+    # create_qrels_from_inpars_response(
+    #     in_path=Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "inpars_mistral-small-2501_processed.json",
+    #     out_path_queries=Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "inpars_mistral-small-2501_queries.tsv",
+    #     out_path_qrels=Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "inpars_mistral-small-2501_qrels.tsv"
+    # )
 
     # create_qrels_from_response(
     #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "annotation_57_mistral-large-2411_v7_processed.json",

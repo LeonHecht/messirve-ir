@@ -1,6 +1,6 @@
 import os
 # make only gpu1 visible
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import logging
 import numpy as np
 import math
@@ -343,9 +343,9 @@ class CrossEncoderTrainer:
             logging_steps=20,
 
             evaluation_strategy="steps",
-            eval_steps=1000,
+            eval_steps=573,
             save_strategy="steps",
-            save_steps=1000,
+            save_steps=573,
 
             load_best_model_at_end=True,
             metric_for_best_model=self.hyperparameters.get("metric_for_best_model", "eval_f1"),
@@ -540,7 +540,7 @@ class CrossEncoderTrainer:
 
         # cut ds to half
         # ds = ds.select(range(len(ds)//10))
-        ds = ds.select(range(200))
+        # ds = ds.select(range(200))
 
         # map IDs to text
         def map_ids(ex):
@@ -924,24 +924,24 @@ class CrossEncoderTrainer:
 
 def main():
     # Base configuration.
-    # model_checkpoint = "mrm8488/legal-longformer-base-8192-spanish"
-    model_checkpoint = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    model_checkpoint = "mrm8488/legal-longformer-base-8192-spanish"
+    # model_checkpoint = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
     hyperparameters = {
         "epochs": 1,
-        "batch_size": 64,
+        "batch_size": 8,
         "weight_decay": 0.01,
         "learning_rate": 3e-5,  # placeholder; will be overridden
         "warmup_ratio": 0.1,
         "metric_for_best_model": "eval_f1",
         "early_stopping_patience": 20,
-        "max_length": 512,
-        "use_stride": True,
-        "stride": 256,
+        "max_length": 2048,
+        "use_stride": False,
+        # "stride": 256,
         "output_dir": os.path.join(STORAGE_DIR, "legal_ir", "results"),
         "loss_type": "weighted",
         # "focal_gamma": 2.0,
         # "focal_alpha": 0.75,
-        "gradient_accumulation_steps": 1,
+        "gradient_accumulation_steps": 4,
         "corpus_type": "original",
         "seed": 42,
         "problem_type": "multi_label_classification",   # single_label_classification

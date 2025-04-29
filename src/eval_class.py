@@ -1,14 +1,40 @@
 import torch
 import pandas as pd
 import os
+import sys
 import ir_datasets
 import pickle
 import json
 from datasets import load_dataset
+
+def configure_python_path():
+    """
+    Add the project root directory to sys.path.
+
+    This function finds the directory two levels up from this file
+    (the repo root) and inserts it at the front of sys.path so that
+    `config.config` can be imported without errors.
+
+    Parameters
+    ----------
+    None
+
+    Returns
+    -------
+    None
+    """
+    project_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir)
+    )
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+# Apply the path tweak before any project imports
+configure_python_path()
+
 import src.scripts.msmarco_eval_ranking as msmarco_eval_ranking
 from sentence_transformers import SentenceTransformer
 from config.config import STORAGE_DIR
-import sys
 
 from src.utils.retrieval_utils import (
     embed_bge,
@@ -160,6 +186,24 @@ class Evaluator:
             )
             
             self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "qrels_py.tsv")
+        elif self.ds == "legal-inpars":
+            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_py.csv"))
+            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_raw_google_ocr.csv"))
+            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_Gpt4o-mini_cleaned.json"))
+            self.doc_dict = {doc_id: doc for doc_id, doc in zip(self.doc_ids, self.docs)}
+            self.query_ids, self.queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "inpars_mistral-small-2501_queries.tsv"))
+            self.query_dict = {query_id: query for query_id, query in zip(self.query_ids, self.queries)}
+
+            qrels_dev_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "inpars_mistral-small-2501_qrels.tsv")
+            self.qrels_dev_df = pd.read_csv(
+                qrels_dev_path,
+                sep="\t",                # TREC qrels are usually tab-separated
+                names=["query_id", "iteration", "doc_id", "relevance"],
+                header=None,            # There's no header in qrels files
+                dtype={"query_id": str, "iteration": int, "doc_id": str, "relevance": int}
+            )
+            
+            self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "inpars_mistral-small-2501_qrels.tsv")
         else:
             raise ValueError("Dataset not supported.")
         print("Data prepared.")
@@ -243,9 +287,9 @@ class Evaluator:
 
     def get_metrics(self):
         self.metrics = get_eval_metrics(self.run, self.qrels_dev_df, self.doc_ids, self.metric_names)
-        # create_results_file(self.run)
-        # create_predictions_file(self.run)   # create TREC style qrel file (contains same info as results.txt)
-        # msmarco_eval_ranking.main(self.path_to_reference_qrels, "results.txt")
+        create_results_file(self.run)
+        create_predictions_file(self.run)   # create TREC style qrel file (contains same info as results.txt)
+        msmarco_eval_ranking.main(self.path_to_reference_qrels, "results.txt")
 
     def create_run_df(self, run, top_k=5):
         """
@@ -378,17 +422,19 @@ if __name__ == "__main__":
     # evaluator.evaluate()
 
     # from transformers import AutoTokenizer, AutoModelForSequenceClassification
-    # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_lr_3e-05_graded_ranknet/checkpoint-858")
-    # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_lr_3e-05_graded_ranknet")
-    evaluator = Evaluator(ds="legal",
-                          model_name="bm25",
-                          metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
-                          model_instance=None,
-                          rerank=True,
-                        #   tokenizer=tokenizer,
-                        #   reranker_model=reranker_model,
-                          reranker_model_type="bge"
-                )
+    # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_lr_3e-05_weighted_stride_inpars/checkpoint-19000")
+    # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_lr_3e-05_weighted_stride_inpars")
+    # Evaluate IR metrics.
+    evaluator = Evaluator(
+        ds="legal-inpars",
+        model_name="bm25",
+        metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
+        rerank=False,
+        # reranker_model=reranker_model,
+        # tokenizer=tokenizer,
+        # max_length=512,
+        # rerank_chunkwise=True,
+    )
     evaluator.evaluate()
 
     # main()

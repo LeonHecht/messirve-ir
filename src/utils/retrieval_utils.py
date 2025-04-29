@@ -1334,7 +1334,7 @@ def rerank_cross_encoder_chunked(model,
                                  max_length,
                                  stride,
                                  aggregator="max",
-                                 batch_size=8):
+                                 batch_size=512):
     """
     Rerank the provided run using a cross-encoder with sliding-window chunking.
 
@@ -1386,61 +1386,94 @@ def rerank_cross_encoder_chunked(model,
         model.to(device)
         model.eval()
 
-    # limit to top_k candidates per query
-    limited_run = {
-        qid: dict(sorted(run[qid].items(), key=lambda x: x[1], reverse=True)[:top_k])
-        for qid in run
-    }
+    reranked_run = {}
 
-    scorer = CrossEncoderScorer(model, tokenizer, head_type=model_type)
-    reranked = {}
+    for qid, scores_dict in tqdm(run.items(), desc="Queries", leave=False):
+        # Pick top_k docs for this query
+        top_docs = sorted(
+            scores_dict.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:top_k]
+        doc_ids = [doc_id for doc_id, _ in top_docs]
+        docs = [doc_dict[str(doc_id)] for doc_id in doc_ids]
+        query_texts = [query_dict[qid]] * len(docs)
 
-    for qid, doc_scores in tqdm(limited_run.items(), total=len(limited_run)):
-        query_text = query_dict[qid]
-        reranked[qid] = {}
+        # Tokenize all (query, doc) pairs with overflowing chunks
+        encoding = tokenizer(
+            query_texts,
+            docs,
+            truncation=True,
+            padding="max_length",
+            max_length=max_length,
+            stride=stride,
+            return_overflowing_tokens=True,
+            return_tensors="pt"
+        ).to(device)
 
-        for doc_id in doc_scores:
-            full_text = doc_dict[str(doc_id)]
-            # tokenize with overlapping windows
-            encoding = tokenizer(
-                query_text,
-                full_text,
-                truncation=True,
-                padding="max_length",
-                return_overflowing_tokens=True,
-                max_length=max_length,
-                stride=stride,
-                return_tensors="pt"
-            )
-            input_ids = encoding["input_ids"]
-            chunks = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+        input_ids = encoding["input_ids"]
+        attention_mask = encoding["attention_mask"]
+        token_type_ids = encoding.get("token_type_ids")
+        overflow_map = encoding["overflow_to_sample_mapping"].tolist()
 
-            # score each chunk
-            chunk_scores = []
-            for i in range(0, len(chunks), batch_size):
-                batch_chunks = chunks[i:i + batch_size]
-                batch_queries = [query_text] * len(batch_chunks)
-                scores = scorer.score(batch_queries, batch_chunks, max_length=max_length)
-                # ensure list
-                if isinstance(scores, (float, int)):
-                    chunk_scores.append(scores)
-                else:
-                    chunk_scores.extend(scores)
+        # Collect chunk scores per document
+        doc_chunk_scores = {doc_id: [] for doc_id in doc_ids}
+        total_chunks = input_ids.size(0)
 
-            # aggregate chunk scores
-            if aggregator == "max":
+        # Batch-score all chunks
+        for start in range(0, total_chunks, batch_size):
+            end = start + batch_size
+            batch = {
+                "input_ids": input_ids[start:end],
+                "attention_mask": attention_mask[start:end]
+            }
+            if token_type_ids is not None:
+                batch["token_type_ids"] = token_type_ids[start:end]
+
+            with torch.no_grad():
+                outputs = model(**batch)
+            logits = outputs.logits
+
+            # Extract scores based on head
+            if model_type == "binary" and logits.size(-1) == 2:
+                scores = torch.softmax(logits, dim=-1)[:, 1]
+            elif model_type == "binary":
+                scores = logits.squeeze(-1)
+            elif model_type == "fine_grained":
+                probs = torch.softmax(logits, dim=-1)
+                idx = torch.arange(
+                    logits.size(-1), device=device, dtype=torch.float
+                )
+                scores = (probs * idx).sum(dim=-1)
+            elif model_type == "ranknet":
+                scores = logits[:, 0]
+            else:
+                scores = logits.squeeze(-1)
+
+            # Map chunk scores back to documents
+            for idx, score in enumerate(scores.cpu().tolist(), start=start):
+                doc_idx = overflow_map[idx]
+                doc_id = doc_ids[doc_idx]
+                doc_chunk_scores[doc_id].append(score)
+
+        # Aggregate scores per document
+        reranked_run[qid] = {}
+        for doc_id, chunk_scores in doc_chunk_scores.items():
+            if not chunk_scores:
+                agg_score = float("-inf")
+            elif aggregator == "max":
                 agg_score = max(chunk_scores)
             elif aggregator == "mean":
                 agg_score = sum(chunk_scores) / len(chunk_scores)
             elif aggregator == "top3":
-                top_scores = sorted(chunk_scores, reverse=True)[:3]
-                agg_score = sum(top_scores) / len(top_scores)
+                top3 = sorted(chunk_scores, reverse=True)[:3]
+                agg_score = sum(top3) / len(top3)
             else:
                 raise ValueError(f"Unknown aggregator: {aggregator}")
+            reranked_run[qid][doc_id] = float(agg_score)
 
-            reranked[qid][doc_id] = float(agg_score)
-
-    return merge_reranked_into_full_run(run, reranked)
+    # Merge with original run if needed
+    return merge_reranked_into_full_run(run, reranked_run)
 
 
 def rerank_cross_encoder(model, model_type, tokenizer, run, top_k, query_dict, doc_dict, max_length, batch_size=8):

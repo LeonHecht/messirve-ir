@@ -120,10 +120,10 @@ def create_runs_file(out_path):
         })
     
     # Convert the result to a JSON formatted string with indentation
-    json_output = json.dumps(output, indent=2)
+    json_output = json.dumps(output, indent=2, ensure_ascii=False)
 
     # Save the result to a JSON file (optional)
-    with open(out_path, 'w') as file:
+    with open(out_path, 'w', encoding="utf-8") as file:
         file.write(json_output)
 
     print(f"File created: {out_path}")
