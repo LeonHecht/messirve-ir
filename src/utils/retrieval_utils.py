@@ -1659,12 +1659,12 @@ def get_legal_dataset(path):
     return df["Codigo"].tolist(), df["text"].tolist()
 
 
-def get_legal_queries(path):
+def get_legal_queries(path, header=None):
     if path.endswith(".csv"):
         # Load the queries
         df = pd.read_csv(path, usecols=["topic_id", "Query"])
     elif path.endswith(".tsv"):
-        df = pd.read_csv(path, sep="\t", header=None, names=["topic_id", "Query"])
+        df = pd.read_csv(path, sep="\t", header=header, names=["topic_id", "Query"])
     # convert topic_id column to list
     df["topic_id"] = df["topic_id"].astype(str)
     return df["topic_id"].tolist(), df["Query"].tolist()
