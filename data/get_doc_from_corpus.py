@@ -34,7 +34,7 @@ def main():
         return
     
     # Example docid to search for
-    docid = "48182"
+    docid = "40793"
     
     # Get the document text
     doc_text = get_doc_from_corpus(docid, corpus_path)

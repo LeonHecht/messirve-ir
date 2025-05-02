@@ -10,21 +10,6 @@ import os
 import sys
 
 def configure_python_path():
-    """
-    Add the project root directory to sys.path.
-
-    This function finds the directory two levels up from this file
-    (the repo root) and inserts it at the front of sys.path so that
-    `config.config` can be imported without errors.
-
-    Parameters
-    ----------
-    None
-
-    Returns
-    -------
-    None
-    """
     project_root = os.path.abspath(
         os.path.join(os.path.dirname(__file__), os.pardir)
     )
@@ -230,9 +215,9 @@ def main_create_scenario_datasets():
     """
     base = Path(STORAGE_DIR) / "legal_ir" / "data"
     # ann  = base / "annotations" / "qrels_py.tsv"
-    ann  = base / "annotations" / "inpars_mistral-small-2501_qrels.tsv"
+    ann  = base / "annotations" / "inpars_mistral-small-2501_qrels_Q1.tsv"
     corp = base / "corpus" / "corpus_py.csv"
-    qry  = base / "corpus" / "inpars_mistral-small-2501_queries.tsv"
+    qry  = base / "corpus" / "inpars_mistral-small-2501_queries_Q1.tsv"
     out  = base / "datasets" / "cross_encoder"
     out.mkdir(parents=True, exist_ok=True)
 
@@ -285,9 +270,9 @@ def main_create_scenario_datasets():
     #             seed=seed
     #         )
     
-    train_qids = load_qids(base / "qids_inpars_train.txt")
-    dev_qids   = load_qids(base / "qids_inpars_dev.txt")
-    test_qids  = load_qids(base / "qids_inpars_test.txt")
+    train_qids = load_qids(base / "qids_inpars_train_Q1.txt")
+    dev_qids   = load_qids(base / "qids_inpars_dev_Q1.txt")
+    test_qids  = load_qids(base / "qids_inpars_test_Q1.txt")
     for split_name, qids in [("train", train_qids), ("dev", dev_qids), ("test", test_qids)]:
         build_ce_dataset(
             qrels_path=str(ann),
@@ -295,9 +280,9 @@ def main_create_scenario_datasets():
             neg_labels=[0],
             corpus_path=str(corp),
             queries_path=str(qry),
-            output_path=str(out / f"bce_6x_inpars_{split_name}.tsv"),
+            output_path=str(out / f"bce_1x_inpars_{split_name}_Q1.tsv"),
             qid_filter=qids,
-            neg_ratio=6,
+            neg_ratio=1,
             seed=seed
         )
 

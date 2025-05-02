@@ -1,6 +1,6 @@
 import os
 # make only gpu1 visible
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import logging
 import numpy as np
 import math
@@ -343,9 +343,9 @@ class CrossEncoderTrainer:
             logging_steps=20,
 
             evaluation_strategy="steps",
-            eval_steps=573,
+            eval_steps=500,
             save_strategy="steps",
-            save_steps=573,
+            save_steps=500,
 
             load_best_model_at_end=True,
             metric_for_best_model=self.hyperparameters.get("metric_for_best_model", "eval_f1"),
@@ -355,6 +355,8 @@ class CrossEncoderTrainer:
             gradient_accumulation_steps=ga,
             # eval_accumulation_steps=1,
             max_grad_norm=20,
+
+            save_total_limit=4,
         )
         
     @staticmethod
@@ -471,7 +473,7 @@ class CrossEncoderTrainer:
 
         # open queries_57.csv with pandas
         # queries = pd.read_csv(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_53.csv"), usecols=["topic_id", "Query"])
-        queries = pd.read_csv(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "inpars_mistral-small-2501_queries.tsv"), header=None, sep="\t", names=["topic_id", "Query"])
+        queries = pd.read_csv(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "inpars_mistral-small-2501_queries_Q1.tsv"), header=None, sep="\t", names=["topic_id", "Query"])
         # convert topic_id column to string
         queries["topic_id"] = queries["topic_id"].astype(str)
 
@@ -727,7 +729,7 @@ class CrossEncoderTrainer:
 
         return train_ds, val_ds, test_ds
 
-    def compute_class_weights_from_dataset(self, train_dataset, alpha=0.5):
+    def compute_class_weights_from_dataset(self, train_dataset, alpha=1.0):
         """
         Compute class weights automatically based on training dataset labels.
 
@@ -924,24 +926,24 @@ class CrossEncoderTrainer:
 
 def main():
     # Base configuration.
-    model_checkpoint = "mrm8488/legal-longformer-base-8192-spanish"
-    # model_checkpoint = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    # model_checkpoint = "mrm8488/legal-longformer-base-8192-spanish"
+    model_checkpoint = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
     hyperparameters = {
         "epochs": 1,
-        "batch_size": 8,
+        "batch_size": 64,
         "weight_decay": 0.01,
         "learning_rate": 3e-5,  # placeholder; will be overridden
         "warmup_ratio": 0.1,
         "metric_for_best_model": "eval_f1",
         "early_stopping_patience": 20,
-        "max_length": 2048,
-        "use_stride": False,
-        # "stride": 256,
+        "max_length": 512,
+        "use_stride": True,
+        "stride": 256,
         "output_dir": os.path.join(STORAGE_DIR, "legal_ir", "results"),
         "loss_type": "weighted",
         # "focal_gamma": 2.0,
         # "focal_alpha": 0.75,
-        "gradient_accumulation_steps": 4,
+        "gradient_accumulation_steps": 1,
         "corpus_type": "original",
         "seed": 42,
         "problem_type": "multi_label_classification",   # single_label_classification
@@ -980,7 +982,7 @@ def main():
 
         # Update output_dir to include the learning rate in the folder name.
         hyperparameters["output_dir"] = os.path.join(
-            STORAGE_DIR, "legal_ir", "results", f"cross_encoder_lr_{lr}_weighted_stride"
+            STORAGE_DIR, "legal_ir", "results", f"cross_encoder_weighted_stride_inpars_Q1_v5"
         )
 
         print(f"\n=== Running cross-encoder training with learning_rate = {lr} ===")
@@ -1011,9 +1013,9 @@ def main():
             #     max_length=hyperparameters["max_length"]
             # )
 
-            ds_train_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_6x_inpars_train.tsv")
-            ds_dev_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_6x_inpars_dev.tsv")
-            ds_test_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_6x_inpars_test.tsv")
+            ds_train_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_1x_inpars_train_Q1.tsv")
+            ds_dev_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_1x_inpars_dev_Q1.tsv")
+            ds_test_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_1x_inpars_test_Q1.tsv")
             
             train_ds = cross_encoder.load_tsv_dataset(ds_train_path, max_length=hyperparameters["max_length"])
             val_ds = cross_encoder.load_tsv_dataset(ds_dev_path, max_length=hyperparameters["max_length"])

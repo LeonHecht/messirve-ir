@@ -278,7 +278,7 @@ class Evaluator:
         # self.write_run_to_tsv(qid="1", out_path="run_Q1_before.tsv")
         # for each query rerank the top 100 docs
         if self.rerank_chunkwise:
-            self.run = rerank_cross_encoder_chunked(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 30, self.query_dict, self.doc_dict,
+            self.run = rerank_cross_encoder_chunked(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 100, self.query_dict, self.doc_dict,
                                                     max_length=self.max_length, stride=self.max_length//2, aggregator="top3")
         else:
             self.run = rerank_cross_encoder(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 30, self.query_dict, self.doc_dict,
@@ -421,19 +421,19 @@ if __name__ == "__main__":
     #             )
     # evaluator.evaluate()
 
-    # from transformers import AutoTokenizer, AutoModelForSequenceClassification
-    # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_lr_3e-05_weighted_stride_inpars/checkpoint-19000")
-    # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_lr_3e-05_weighted_stride_inpars")
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
+    tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
     # Evaluate IR metrics.
     evaluator = Evaluator(
-        ds="legal-inpars",
+        ds="legal",
         model_name="bm25",
         metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
-        rerank=False,
-        # reranker_model=reranker_model,
-        # tokenizer=tokenizer,
-        # max_length=512,
-        # rerank_chunkwise=True,
+        rerank=True,
+        reranker_model=reranker_model,
+        tokenizer=tokenizer,
+        max_length=512,
+        rerank_chunkwise=True,
     )
     evaluator.evaluate()
 
