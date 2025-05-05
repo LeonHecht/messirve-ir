@@ -4,6 +4,7 @@ import sys
 import json
 import csv
 from typing import List, Dict
+import pandas as pd
 
 
 def configure_python_path():
@@ -115,10 +116,85 @@ def build_baai_ds():
             qids,
             queries,
             doc_dict,
-            os.path.join(base_dir, "datasets", "cross_encoder", out_path),
+            os.path.join(base_dir, "datasets", "dual_encoder", out_path),
             prompt="Documento legal con el siguiente tema: "
         )
 
 
+def build_baai_eval_ds():
+    # in paths
+    base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
+    corpus_dir = os.path.join(base_dir, "corpus")
+    query_path = os.path.join(corpus_dir, "inpars_mistral-small-2501_queries.tsv")
+    corpus_path = os.path.join(corpus_dir, "corpus_py.csv")
+    qrels_path = os.path.join(base_dir, "datasets", "cross_encoder", "bce_6x_inpars_test.tsv")
+    
+    # out paths
+    baai_dir = os.path.join(base_dir, "baai_bce_inpars_test")
+    baai_corpus_path = os.path.join(baai_dir, "corpus.jsonl")
+    baai_queries_path = os.path.join(baai_dir, "test_queries.jsonl")
+    baai_qrels_path = os.path.join(baai_dir, "test_qrels.jsonl")
+
+    qids, queries = get_legal_queries(query_path, header=None)
+    dids, docs = get_legal_dataset(corpus_path)
+    qrels_dev_df = pd.read_csv(
+            qrels_path,
+            sep="\t",                # TREC qrels are usually tab-separated
+            names=["query_id", "doc_id", "relevance"],
+            header=0,            # There's no header in qrels files
+            dtype={"query_id": str, "doc_id": str, "relevance": int}
+        )
+    qrel_qids = qrels_dev_df["query_id"].tolist()
+    qrel_dids = qrels_dev_df["doc_id"].tolist()
+    qrel_relevance = qrels_dev_df["relevance"].tolist()
+
+    # baai corpus structure
+    # {"id": "566392", "title": "", "text": "Have the check reissued to the proper payee."}
+    baai_corpus = [
+        {
+            "id": did,
+            "title": "",
+            "text": doc
+        }
+        for did, doc in zip(dids, docs)
+    ]
+
+    with open(baai_corpus_path, "w", encoding="utf-8") as f:
+        for line in baai_corpus:
+            f.write(json.dumps(line, ensure_ascii=False) + '\n')
+    
+    # baai queries structure
+    # {"id": "15", "text": "Can I send a money order from USPS as a business?"}
+    baai_queries = [
+        {
+            "id": qid.replace("_Q", "0000"),
+            "text": query
+        }
+        for qid, query in zip(qids, queries) if qid in qrel_qids
+    ]
+
+    with open(baai_queries_path, "w", encoding="utf-8") as f:
+        for line in baai_queries:
+            f.write(json.dumps(line, ensure_ascii=False) + '\n')
+    
+    # baai qrels structure
+    # {"qid": "8", "docid": "566392", "relevance": 1}
+    baai_qrels = [
+        {
+            "qid": qid.replace("_Q", "0000"),
+            "docid": did,
+            "relevance": relevance
+        }
+        for qid, did, relevance in zip(qrel_qids, qrel_dids, qrel_relevance) if relevance == 1
+    ]
+
+    with open(baai_qrels_path, "w", encoding="utf-8") as f:
+        for line in baai_qrels:
+            f.write(json.dumps(line, ensure_ascii=False) + '\n')
+
+    print("Done building BAAI eval dataset")
+
+
 if __name__ == "__main__":
-    build_baai_ds()
+    # build_baai_ds()
+    build_baai_eval_ds()

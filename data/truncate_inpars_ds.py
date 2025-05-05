@@ -1,3 +1,6 @@
+"""Truncate the inpars dataset to only include queries ending with 'Q1'."""
+
+
 import os
 import sys
 

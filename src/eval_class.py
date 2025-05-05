@@ -421,19 +421,23 @@ if __name__ == "__main__":
     #             )
     # evaluator.evaluate()
 
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification
-    reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
-    tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
+    # from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    # # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
+    # # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
+    # model_path = "./src/scripts/test_encoder_only_m3_bge-m3_sd/checkpoint-1308"
+    # model = AutoModelForSequenceClassification(model_path)
+    # tokenizer = AutoTokenizer.from_pretrained(model_path)
+
     # Evaluate IR metrics.
     evaluator = Evaluator(
-        ds="legal",
-        model_name="bm25",
+        ds="legal-inpars",
+        model_name="bm25",  # TODO
         metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
-        rerank=True,
-        reranker_model=reranker_model,
-        tokenizer=tokenizer,
-        max_length=512,
-        rerank_chunkwise=True,
+        rerank=False,
+        # reranker_model=reranker_model,
+        # tokenizer=tokenizer,
+        # max_length=512,
+        # rerank_chunkwise=True,
     )
     evaluator.evaluate()
 

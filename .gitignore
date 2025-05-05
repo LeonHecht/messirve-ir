@@ -96,3 +96,5 @@ __pycache__/
 checkpoints/
 models/
 outputs/
+
+src/scripts/test_encoder_only_m3_bge-m3_sd/
