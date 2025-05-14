@@ -312,7 +312,7 @@ if __name__ == "__main__":
 
     # Single model evaluation     
     # gold_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "qrels_mistral-small-2501_v7.tsv"
-    pred_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "qrels_mistral-large-2411_v7.tsv"
+    pred_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "qrels_mistral-small-2501_v7_QC.tsv"
     # pred_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "qrels_mistral-small-2501_v7.tsv"
     evaluate_qrels(gold_path, pred_path)
 

@@ -1,6 +1,7 @@
 def get_bge_m3_model(checkpoint):
     """ Load BAAI embeddings model."""
     from FlagEmbedding import BGEM3FlagModel
+    print("Loading BAAI embeddings model from checkpoint:", checkpoint)
     # model = BGEM3FlagModel(checkpoint, use_fp16=True) # Setting use_fp16 to True speeds up computation with a slight performance degradation
     model = BGEM3FlagModel(checkpoint) # Setting use_fp16 to True speeds up computation with a slight performance degradation
     return model

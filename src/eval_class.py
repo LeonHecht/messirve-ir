@@ -1,6 +1,7 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import torch
 import pandas as pd
-import os
 import sys
 import ir_datasets
 import pickle
@@ -8,21 +9,6 @@ import json
 from datasets import load_dataset
 
 def configure_python_path():
-    """
-    Add the project root directory to sys.path.
-
-    This function finds the directory two levels up from this file
-    (the repo root) and inserts it at the front of sys.path so that
-    `config.config` can be imported without errors.
-
-    Parameters
-    ----------
-    None
-
-    Returns
-    -------
-    None
-    """
     project_root = os.path.abspath(
         os.path.join(os.path.dirname(__file__), os.pardir)
     )
@@ -92,7 +78,7 @@ class Evaluator:
         reranker_model : object, optional
             Reranker model instance.
     """
-    def __init__(self, ds, model_name, metric_names, limit=None, reuse_run=False, model_instance=None, rerank=False, tokenizer=None, reranker_model=None, reranker_model_type=None, max_length=-1, rerank_chunkwise=False):
+    def __init__(self, ds, model_name, metric_names, limit=None, reuse_run=False, model_instance=None, rerank=False, tokenizer=None, reranker_model=None, reranker_model_type=None, max_length=-1, rerank_chunkwise=False, checkpoint=None):
         self.ds = ds
         self.model_name = model_name
         self.metric_names = metric_names
@@ -105,6 +91,7 @@ class Evaluator:
         self.reranker_model_type = reranker_model_type
         self.max_length = max_length
         self.rerank_chunkwise = rerank_chunkwise
+        self.checkpoint = checkpoint
 
         self.device = torch.device("cuda:0")
         self.docs = None
@@ -166,44 +153,61 @@ class Evaluator:
             print("Number of queries:", len(self.queries))
             print("Number of docs:", len(self.docs))
             # rel_doc_ids = qrels_dev_df["doc_id"].unique()
-        elif self.ds == "messirve":
-            self.docs, self.queries, self.doc_ids, self.query_ids = get_messirve_corpus("ar")
-        elif self.ds == "legal":
+
+        elif self.ds in ("legal-57", "legal-inpars", "legal-synthetic"):
             self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_py.csv"))
             # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_raw_google_ocr.csv"))
             # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_Gpt4o-mini_cleaned.json"))
             self.doc_dict = {doc_id: doc for doc_id, doc in zip(self.doc_ids, self.docs)}
-            self.query_ids, self.queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_57.csv"))
-            self.query_dict = {query_id: query for query_id, query in zip(self.query_ids, self.queries)}
-
-            qrels_dev_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "qrels_py.tsv")
-            self.qrels_dev_df = pd.read_csv(
-                qrels_dev_path,
-                sep="\t",                # TREC qrels are usually tab-separated
-                names=["query_id", "iteration", "doc_id", "relevance"],
-                header=None,            # There's no header in qrels files
-                dtype={"query_id": int, "iteration": int, "doc_id": int, "relevance": int}
-            )
             
-            self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "qrels_py.tsv")
-        elif self.ds == "legal-inpars":
-            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_py.csv"))
-            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_raw_google_ocr.csv"))
-            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_Gpt4o-mini_cleaned.json"))
-            self.doc_dict = {doc_id: doc for doc_id, doc in zip(self.doc_ids, self.docs)}
-            self.query_ids, self.queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "inpars_mistral-small-2501_queries.tsv"))
-            self.query_dict = {query_id: query for query_id, query in zip(self.query_ids, self.queries)}
+            if self.ds == "legal-57":
+                queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_57.tsv")
+                self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "qrels_py.tsv")
+                test_qids_path = None
+            elif self.ds == "legal-inpars":
+                queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "inpars_mistral-small-2501_queries.tsv")
+                self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "inpars_mistral-small-2501_qrels.tsv")
+                test_qids_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qids_inpars_test.txt")
+            elif self.ds == "legal-synthetic":
+                queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "consultas_sinteticas_380_filtered.tsv")
+                self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "qrels_synthetic_mistral-small-2501_filtered.tsv")
+                test_qids_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qids_synthetic_test.txt")
 
-            qrels_dev_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "inpars_mistral-small-2501_qrels.tsv")
+            self.query_ids, self.queries = get_legal_queries(queries_path)
+
             self.qrels_dev_df = pd.read_csv(
-                qrels_dev_path,
+                self.path_to_reference_qrels,
                 sep="\t",                # TREC qrels are usually tab-separated
                 names=["query_id", "iteration", "doc_id", "relevance"],
                 header=None,            # There's no header in qrels files
                 dtype={"query_id": str, "iteration": int, "doc_id": str, "relevance": int}
             )
-            
-            self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "inpars_mistral-small-2501_qrels.tsv")
+
+            if test_qids_path is not None:
+                with open(test_qids_path, "r") as f:
+                    test_qids = f.readlines()
+                test_qids = [qid.strip() for qid in test_qids]
+
+                # filter queries and query_ids to only include the ones in the test set
+                self.queries = [query for query_id, query in zip(self.query_ids, self.queries) if query_id in test_qids]
+                self.query_ids = [query_id for query_id in self.query_ids if query_id in test_qids]
+
+                # filter qrels to only include the ones in the test set
+                self.qrels_dev_df = self.qrels_dev_df[self.qrels_dev_df["query_id"].isin(test_qids)]
+
+                # Right after filtering qrels_dev_df:
+                filtered_qrels_path = os.path.join(STORAGE_DIR,
+                    "legal_ir", "data", "annotations", f"{self.ds}_qrels_test.tsv")
+                self.qrels_dev_df.to_csv(
+                    filtered_qrels_path,
+                    sep="\t",
+                    header=False,
+                    index=False
+                )
+                self.path_to_reference_qrels = filtered_qrels_path
+
+            # create a dictionary of query_id to query
+            self.query_dict = {query_id: query for query_id, query in zip(self.query_ids, self.queries)}
         else:
             raise ValueError("Dataset not supported.")
         print("Data prepared.")
@@ -234,7 +238,7 @@ class Evaluator:
                 self.doc_dict, self.query_dict, self.reuse_run
             ),
             "bge": lambda: embed_bge(
-                get_bge_m3_model('BAAI/bge-m3'),
+                get_bge_m3_model('BAAI/bge-m3') if self.checkpoint is None else get_bge_m3_model(self.checkpoint),
                 self.docs, self.queries, self.doc_ids, self.query_ids, self.reuse_run
             ),
             "bge-sparse": lambda: embed_bge_sparse(
@@ -281,11 +285,16 @@ class Evaluator:
             self.run = rerank_cross_encoder_chunked(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 100, self.query_dict, self.doc_dict,
                                                     max_length=self.max_length, stride=self.max_length//2, aggregator="top3")
         else:
-            self.run = rerank_cross_encoder(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 30, self.query_dict, self.doc_dict,
+            self.run = rerank_cross_encoder(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 100, self.query_dict, self.doc_dict,
                                     max_length=self.max_length)
         self.write_run_to_tsv(qid="1", out_path="run_Q1_after.tsv")
 
     def get_metrics(self):
+        run_qids = set(self.run.keys())
+        ref_qids = set(self.qrels_dev_df["query_id"].astype(str).unique())
+        print(f"Run queries:   {len(run_qids)}")
+        print(f"QREL queries:  {len(ref_qids)}")
+        print(f"Intersection:  {len(run_qids & ref_qids)}")
         self.metrics = get_eval_metrics(self.run, self.qrels_dev_df, self.doc_ids, self.metric_names)
         create_results_file(self.run)
         create_predictions_file(self.run)   # create TREC style qrel file (contains same info as results.txt)
@@ -346,12 +355,18 @@ class Evaluator:
         return df
 
     def evaluate(self):
+        import pickle
         self.load_data()
         self.get_run()
+        # # save run using pickle
+        # with open("run_bm25.pkl", "wb") as f:
+        #     pickle.dump(self.run, f)
         # self.run_df = self.create_run_df(self.run, top_k=10)
         if self.rerank:
             self.rerank_run()
         self.get_metrics()
+        # with open("metrics.pkl", "wb") as f:
+        #     pickle.dump(self.metrics, f)
 
 
 def get_messirve_corpus(country):
@@ -402,9 +417,7 @@ def main():
                 )
     evaluator.evaluate()
 
-import os
-# make only gpu 0 visible
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 if __name__ == "__main__":
     # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_2048/checkpoint-320")
     # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_2048")
@@ -421,23 +434,26 @@ if __name__ == "__main__":
     #             )
     # evaluator.evaluate()
 
-    # from transformers import AutoTokenizer, AutoModelForSequenceClassification
-    # # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
-    # # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
-    # model_path = "./src/scripts/test_encoder_only_m3_bge-m3_sd/checkpoint-1308"
-    # model = AutoModelForSequenceClassification(model_path)
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
+    # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
+    model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_synthetic_6x"
+    # model = AutoModelForSequenceClassification.from_pretrained(model_path)
     # tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     # Evaluate IR metrics.
     evaluator = Evaluator(
-        ds="legal-inpars",
-        model_name="bm25",  # TODO
+        ds="legal-57",
+        model_name="bge",
         metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
         rerank=False,
+        # model_instance=model,
+        checkpoint=model_path,
         # reranker_model=reranker_model,
         # tokenizer=tokenizer,
         # max_length=512,
-        # rerank_chunkwise=True,
+        # rerank_chunkwise=False,
+        # reranker_model_type="bge"
     )
     evaluator.evaluate()
 

@@ -239,6 +239,7 @@ def create_jsonl_original_annotation_mistral():
     #   {
     #   "run": [
     #     {
+    
     #       "topic_id": "1:Hurto",
     #       "documents": [
     #         {
@@ -347,6 +348,16 @@ def create_jsonl_inpars_mistral():
         "No incluyas ningún otro texto o explicación adicional."
     )
 
+    sys_instruct_v3 = (
+        "Eres un abogado penalista paraguayo experto en análisis jurisprudencial y sistemas de búsqueda.\n"
+        "A continuación, recibirás un documento legal completo. Genera una consulta que un abogado podría ingresar "
+        "en un buscador jurídico para encontrar este documento.\n"
+        "Las consultas deben mencionar claramente los aspectos que caracterizan el caso y que permiten distinguirlo "
+        "contra otros casos. No menciones nombres de personas en tus consultas.\n"
+        "Devuelve tu respuesta únicamente en formato de lista de strings:\n"
+        "['consulta1', 'consulta2', ...]\n"
+        "No incluyas ningún otro texto o explicación adicional."
+    )
 
     # User Template for LLM Annotation v1, v3:
     user_template = (
@@ -419,6 +430,7 @@ def create_qrels_from_response(in_path, out_path):
             # Extract relevant information
             relevant = content.get("relevant")
             evidence = content.get("evidence")
+            # evidence = None
 
             if relevant == "yes":
                 label = 1
@@ -428,7 +440,10 @@ def create_qrels_from_response(in_path, out_path):
                 print(f"Invalid label for custom_id {custom_id}: {relevant}")
                 continue
             # Write to qrels file
-            f.write(f"{query_id}\t0\t{doc_id}\t{label}\t{evidence}\n")
+            if evidence is not None:
+                f.write(f"{query_id}\t0\t{doc_id}\t{label}\t{evidence}\n")
+            else:
+                f.write(f"{query_id}\t0\t{doc_id}\t{label}\n")
 
 
 def create_qrels_from_inpars_response(in_path, out_path_queries, out_path_qrels):
@@ -507,13 +522,57 @@ def create_new_corpus(filename):
         json.dump(id_to_response, f, indent=4, ensure_ascii=False)
 
 
+import pandas as pd
+def filter_qrels_without_relevant_docs(in_path):
+    qrels_df = pd.read_csv(
+                in_path,
+                sep="\t",                # TREC qrels are usually tab-separated
+                names=["query_id", "iteration", "doc_id", "relevance", "evidence"],
+                header=None,            # There's no header in qrels files
+                dtype={"query_id": str, "iteration": int, "doc_id": str, "relevance": int, "evidence": str}
+            )
+    # 2. Find all query IDs that have at least one row with relevance > 0
+    #    Here `> 0` is plain Python comparison, no .gt() needed.
+    relevant_queries = qrels_df.loc[qrels_df["relevance"] > 0, "query_id"].unique()
+
+    # 3. Keep only the rows whose query_id is in that list
+    filtered_df = qrels_df[qrels_df["query_id"].isin(relevant_queries)]
+
+    # 4. Write out to a new file
+    out_path = Path(in_path).with_name(Path(in_path).stem + "_filtered.tsv")
+    filtered_df.to_csv(out_path, sep="\t", index=False, header=False)
+
+
+def filter_queries_without_relevant_docs(qrels_path, queries_path):
+    filtered_qrels_df = pd.read_csv(
+                qrels_path,
+                sep="\t",                # TREC qrels are usually tab-separated
+                names=["query_id", "iteration", "doc_id", "relevance"],
+                header=None,            # There's no header in qrels files
+                dtype={"query_id": str, "iteration": int, "doc_id": str, "relevance": int}
+            )
+    
+    query_ids, queries = get_legal_queries(str(queries_path))
+    query_dict = dict(zip(query_ids, queries))
+
+    # Filter out query_ids and queries that do not appear in the qrels
+    filtered_query_ids = filtered_qrels_df["query_id"].unique()
+    filtered_query_dict = {qid: query for qid, query in query_dict.items() if qid in filtered_query_ids}
+
+    # Save the filtered queries to a new TSV file
+    with open(str(queries_path).replace(".tsv", "_filtered.tsv"), 'w', encoding='utf-8') as f:
+        f.write("topic_id\tQuery\n")
+        for qid, query in filtered_query_dict.items():
+            f.write(f"{qid}\t{query}\n")
+
+
 if __name__ == "__main__":
-    requests = create_jsonl_original_annotation_mistral()
+    # requests = create_jsonl_original_annotation_mistral()
     # requests = create_jsonl_inpars_mistral()
 
     # process_response_file(
-    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "inpars_mistral-small-2501.jsonl",
-    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "inpars_mistral-small-2501_processed.json"
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "annotation_synthetic_mistral-small-2501.jsonl",
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "annotation_synthetic_mistral-small-2501_processed.json"
     # )
 
     # create_qrels_from_inpars_response(
@@ -523,6 +582,15 @@ if __name__ == "__main__":
     # )
 
     # create_qrels_from_response(
-    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "annotation_57_mistral-large-2411_v7_processed.json",
-    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "qrels_mistral-large-2411_v7.tsv"
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "annotation_synthetic_mistral-small-2501_processed.json",
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "qrels_synthetic_mistral-small-2501_raw_evidence.tsv"
     # )
+
+    # filter_qrels_without_relevant_docs(
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "qrels_synthetic_mistral-small-2501_raw_evidence.tsv"
+    # )
+
+    filter_queries_without_relevant_docs(
+        Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "qrels_synthetic_mistral-small-2501_filtered.tsv",
+        Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "consultas_sinteticas_380_unfiltered.tsv"
+    )

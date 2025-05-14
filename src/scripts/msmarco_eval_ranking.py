@@ -14,7 +14,31 @@ from collections import Counter
 
 MaxMRRRank = 10
 
-def load_reference_from_stream(f):
+def is_binary(f):
+    tmp = {}
+    for l in f:
+        try:
+            l = l.strip().split('\t')
+            qid = str(l[0])
+            if qid in tmp:
+                pass
+            else:
+                tmp[qid] = []
+            # append relevance annotation (either 0 or 1 or 0-3)
+            tmp[qid].append(str(l[3]))
+        except:
+            raise IOError('\"%s\" is not valid format' % l)
+
+    for qid, relevance_list in tmp.items():
+        if "2" in relevance_list:
+            return False
+        elif "3" in relevance_list:
+            return False
+
+    return True
+
+
+def load_reference_from_stream(f, is_binary):
     """Load Reference reference relevant passages
     Args:f (stream): stream to load.
     Returns:qids_to_relevant_passageids (dict): dictionary mapping from query_id (int) to relevant passages (list of ints). 
@@ -23,14 +47,19 @@ def load_reference_from_stream(f):
     for l in f:
         try:
             l = l.strip().split('\t')
-            qid = int(l[0])
+            qid = str(l[0])
             if qid in qids_to_relevant_passageids:
                 pass
             else:
                 qids_to_relevant_passageids[qid] = []
-            qids_to_relevant_passageids[qid].append(int(l[2]))
+            # ONLY APPEND POSITIVE ANNOTATIONS
+            if is_binary and int(l[3]) == 1:
+                qids_to_relevant_passageids[qid].append(str(l[2]))
+            elif not is_binary and int(l[3]) >= 2:
+                qids_to_relevant_passageids[qid].append(str(l[2]))
         except:
             raise IOError('\"%s\" is not valid format' % l)
+    
     return qids_to_relevant_passageids
 
 def load_reference(path_to_reference):
@@ -39,7 +68,9 @@ def load_reference(path_to_reference):
     Returns:qids_to_relevant_passageids (dict): dictionary mapping from query_id (int) to relevant passages (list of ints). 
     """
     with open(path_to_reference,'r') as f:
-        qids_to_relevant_passageids = load_reference_from_stream(f)
+        binary = is_binary(f)
+    with open(path_to_reference,'r') as f:
+        qids_to_relevant_passageids = load_reference_from_stream(f, binary)
     return qids_to_relevant_passageids
 
 def load_candidate_from_stream(f):
@@ -51,8 +82,8 @@ def load_candidate_from_stream(f):
     for l in f:
         try:
             l = l.strip().split('\t')
-            qid = int(l[0])
-            pid = int(l[1])
+            qid = str(l[0])
+            pid = str(l[1])
             rank = int(l[2])
             if qid in qid_to_ranked_candidate_passages:
                 pass    

@@ -404,7 +404,7 @@ def embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run):
     path = 'corpus/embeddings_train_corpus_bge-m3.npy'
     if not os.path.exists(path) or not reuse_run:
         print("Embedding docs...", end="")
-        embeddings_docs = model.encode(docs, batch_size=8, max_length=MAX_DOC_LEN)['dense_vecs']    # takes about 7min
+        embeddings_docs = model.encode(docs, batch_size=8, max_length=MAX_DOC_LEN)['dense_vecs']
         print("Done.")
         # save embeddings
         # print("Saving embeddings...", end="")
@@ -1515,7 +1515,8 @@ def rerank_cross_encoder(model, model_type, tokenizer, run, top_k, query_dict, d
     """
     if model_type == "bge":
         from FlagEmbedding import FlagLLMReranker
-        model = FlagLLMReranker('BAAI/bge-reranker-v2-gemma', use_bf16=True)    # use_bf16=True
+        model = FlagLLMReranker('BAAI/bge-reranker-v2-m3', use_bf16=False)
+        # model = FlagLLMReranker('BAAI/bge-reranker-v2-gemma', use_bf16=False)
     elif model_type == "sbert":
         from sentence_transformers import CrossEncoder
         model = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
@@ -1594,6 +1595,9 @@ def get_eval_metrics(run, qrels_dev_df, all_docids, metrics):
     
     else:
         results = evaluator.evaluate(run)
+
+        with open("metrics_per_query.pkl", "wb") as f:
+            pickle.dump(results, f)
     
         result_values = list(results.values())
         metric_names = list(result_values[0].keys())      # because some result names change e.g. from ndcg_cut.10 to ndcg_cut_10
@@ -1692,12 +1696,10 @@ def get_legal_dataset(path):
     return df["Codigo"].tolist(), df["text"].tolist()
 
 
-def get_legal_queries(path, header=None):
-    if path.endswith(".csv"):
-        # Load the queries
-        df = pd.read_csv(path, usecols=["topic_id", "Query"])
-    elif path.endswith(".tsv"):
-        df = pd.read_csv(path, sep="\t", header=header, names=["topic_id", "Query"])
+def get_legal_queries(path):
+    if not path.endswith(".tsv"):
+        raise ValueError("Path must end with .tsv")
+    df = pd.read_csv(path, sep="\t", header=0, names=["topic_id", "Query"])
     # convert topic_id column to list
     df["topic_id"] = df["topic_id"].astype(str)
     return df["topic_id"].tolist(), df["Query"].tolist()

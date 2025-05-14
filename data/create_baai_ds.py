@@ -5,6 +5,7 @@ import json
 import csv
 from typing import List, Dict
 import pandas as pd
+import random
 
 
 def configure_python_path():
@@ -28,10 +29,16 @@ def convert_tsv_to_json(
     doc_map: Dict[str, str],
     output_path: str,
     prompt: str,
+    negatives_per_positive: int = 6,
 ) -> None:
     """
     Convert a TSV dataset with qid, doc_id, and label to JSON lines format,
-    replacing doc IDs with full document texts.
+    creating one training group per positive document with a fixed number of
+    unique negatives.
+
+    Each JSON object contains exactly one positive passage and
+    `negatives_per_positive` distinct negative passages for the same query,
+    and negatives are not reused across positives.
 
     Parameters
     ----------
@@ -43,11 +50,13 @@ def convert_tsv_to_json(
     queries : list of str
         List of query strings corresponding to `query_ids`.
     doc_map : dict of str -> str
-        Mapping from document ID to full document text (as returned by get_legal_dataset).
+        Mapping from document ID to full document text.
     output_path : str
         Path to write the output JSON lines file.
     prompt : str
         Prompt string to include in each JSON object.
+    negatives_per_positive : int, optional
+        Number of unique negatives to assign to each positive (default is 6).
 
     Returns
     -------
@@ -56,7 +65,7 @@ def convert_tsv_to_json(
     # Map query IDs to query strings
     query_map: Dict[str, str] = dict(zip(query_ids, queries))
 
-    # Parse TSV and group document texts by qid and label
+    # Group document texts by qid and label
     grouped: Dict[str, Dict[str, List[str]]] = {}
     with open(tsv_path, 'r', newline='', encoding='utf-8') as tsv_in:
         reader = csv.DictReader(tsv_in, delimiter='\t')
@@ -64,50 +73,70 @@ def convert_tsv_to_json(
             qid = row['qid']
             doc_id = row['doc_id']
             label = row['label']
-            if qid not in grouped:
-                grouped[qid] = {'pos': [], 'neg': []}
-            text = doc_map[doc_id]
+            grouped.setdefault(qid, {'pos': [], 'neg': []})
+            text = doc_map.get(doc_id, '')
             if label == '1':
                 grouped[qid]['pos'].append(text)
             else:
                 grouped[qid]['neg'].append(text)
 
-    # Write JSON lines
+    # Write JSON lines with unique negatives per positive
     with open(output_path, 'w', encoding='utf-8') as json_out:
         for qid, docs in grouped.items():
-            entry = {
-                'query': query_map[qid],
-                'pos': docs['pos'],
-                'neg': docs['neg'],
-                'pos_scores': [],
-                'neg_scores': [],
-                'prompt': prompt,
-                'type': ""
-            }
-            json_out.write(json.dumps(entry, ensure_ascii=False) + '\n')
-        
-    print("Converted TSV to JSON lines:", output_path)
+            pos_texts = docs['pos']
+            neg_texts = docs['neg']
+            total_required = len(pos_texts) * negatives_per_positive
+            if len(neg_texts) < total_required:
+                raise ValueError(
+                    f"Not enough negatives for query {qid}: "
+                    f"have {len(neg_texts)}, need {total_required}"
+                )
+            # Choose or trim negatives to match exactly P * N
+            if len(neg_texts) != total_required:
+                negs_to_use = random.sample(neg_texts, total_required)
+            else:
+                negs_to_use = neg_texts.copy()
+            random.shuffle(negs_to_use)
+            for idx, pos in enumerate(pos_texts):
+                start = idx * negatives_per_positive
+                end = start + negatives_per_positive
+                sampled_negs = negs_to_use[start:end]
+                entry = {
+                    'query': query_map[qid],
+                    'pos': [pos],
+                    'neg': sampled_negs,
+                    'pos_scores': [],
+                    'neg_scores': [],
+                    'prompt': prompt,
+                    'type': ''
+                }
+                json_out.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+    print(
+        f"Converted TSV to JSON lines with {negatives_per_positive} "
+        f"unique negatives per positive: {output_path}"
+    )
 
 
 def build_baai_ds():
     base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
     corpus_dir = os.path.join(base_dir, "corpus")
-    query_path = os.path.join(corpus_dir, "inpars_mistral-small-2501_queries.tsv")
+    query_path = os.path.join(corpus_dir, "consultas_sinteticas_380_filtered.tsv")
     corpus_path = os.path.join(corpus_dir, "corpus_py.csv")
 
-    qids, queries = get_legal_queries(query_path, header=None)
+    qids, queries = get_legal_queries(query_path)
     dids, docs = get_legal_dataset(corpus_path)
     doc_dict = dict(zip(dids, docs))
 
     in_paths = [
-        "bce_6x_inpars_train.tsv",
-        "bce_6x_inpars_dev.tsv",
-        "bce_6x_inpars_test.tsv",
+        "bce_6x_synthetic_train.tsv",
+        "bce_6x_synthetic_dev.tsv",
+        "bce_6x_synthetic_test.tsv",
     ]
     out_paths = [
-        "bce_6x_inpars_train_baai.jsonl",
-        "bce_6x_inpars_dev_baai.jsonl",
-        "bce_6x_inpars_test_baai.jsonl",
+        "bce_6x_synthetic_train_baai.jsonl",
+        "bce_6x_synthetic_dev_baai.jsonl",
+        "bce_6x_synthetic_test_baai.jsonl",
     ]
 
     for in_path, out_path in zip(in_paths, out_paths):
@@ -121,29 +150,32 @@ def build_baai_ds():
         )
 
 
-def build_baai_eval_ds():
-    # in paths
-    base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
-    corpus_dir = os.path.join(base_dir, "corpus")
-    query_path = os.path.join(corpus_dir, "inpars_mistral-small-2501_queries.tsv")
-    corpus_path = os.path.join(corpus_dir, "corpus_py.csv")
-    qrels_path = os.path.join(base_dir, "datasets", "cross_encoder", "bce_6x_inpars_test.tsv")
+def build_baai_eval_ds(query_path, corpus_path, qrels_path,
+                       baai_corpus_path, baai_queries_path, baai_qrels_path,
+                       qrel_num_cols, relevance_range):
     
-    # out paths
-    baai_dir = os.path.join(base_dir, "baai_bce_inpars_test")
-    baai_corpus_path = os.path.join(baai_dir, "corpus.jsonl")
-    baai_queries_path = os.path.join(baai_dir, "test_queries.jsonl")
-    baai_qrels_path = os.path.join(baai_dir, "test_qrels.jsonl")
-
     qids, queries = get_legal_queries(query_path, header=None)
     dids, docs = get_legal_dataset(corpus_path)
-    qrels_dev_df = pd.read_csv(
-            qrels_path,
-            sep="\t",                # TREC qrels are usually tab-separated
-            names=["query_id", "doc_id", "relevance"],
-            header=0,            # There's no header in qrels files
-            dtype={"query_id": str, "doc_id": str, "relevance": int}
-        )
+    if qrel_num_cols == 3:
+        qrels_dev_df = pd.read_csv(
+                qrels_path,
+                sep="\t",                # TREC qrels are usually tab-separated
+                names=["query_id", "doc_id", "relevance"],
+                header=0,            # There's no header in qrels files
+                dtype={"query_id": str, "doc_id": str, "relevance": int}
+            )
+    elif qrel_num_cols == 4:
+        qrels_dev_df = pd.read_csv(
+                qrels_path,
+                sep="\t",                # TREC qrels are usually tab-separated
+                names=["query_id", "iteration", "doc_id", "relevance"],
+                header=0,            # There's no header in qrels files
+                dtype={"query_id": str, "iteration": int, "doc_id": str, "relevance": int}
+            )
+        qrels_dev_df = qrels_dev_df.drop(columns=["iteration"])
+    else:
+        raise ValueError("qrel_num_cols must be 3 or 4")
+
     qrel_qids = qrels_dev_df["query_id"].tolist()
     qrel_dids = qrels_dev_df["doc_id"].tolist()
     qrel_relevance = qrels_dev_df["relevance"].tolist()
@@ -183,9 +215,9 @@ def build_baai_eval_ds():
         {
             "qid": qid.replace("_Q", "0000"),
             "docid": did,
-            "relevance": relevance
+            "relevance": 1
         }
-        for qid, did, relevance in zip(qrel_qids, qrel_dids, qrel_relevance) if relevance == 1
+        for qid, did, relevance in zip(qrel_qids, qrel_dids, qrel_relevance) if relevance in relevance_range
     ]
 
     with open(baai_qrels_path, "w", encoding="utf-8") as f:
@@ -196,5 +228,23 @@ def build_baai_eval_ds():
 
 
 if __name__ == "__main__":
-    # build_baai_ds()
-    build_baai_eval_ds()
+    build_baai_ds()
+
+    # # in paths
+    # base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
+    # corpus_dir = os.path.join(base_dir, "corpus")
+    # # query_path = os.path.join(corpus_dir, "inpars_mistral-small-2501_queries.tsv")
+    # query_path = os.path.join(corpus_dir, "queries_57.csv")
+    # corpus_path = os.path.join(corpus_dir, "corpus_py.csv")
+    # # qrels_path = os.path.join(base_dir, "datasets", "cross_encoder", "bce_6x_inpars_test.tsv")
+    # qrels_path = os.path.join(base_dir, "annotations", "qrels_py.tsv")
+    
+    # # out paths
+    # baai_dir = os.path.join(base_dir, "baai_57")
+    # baai_corpus_path = os.path.join(baai_dir, "corpus.jsonl")
+    # baai_queries_path = os.path.join(baai_dir, "test_queries.jsonl")
+    # baai_qrels_path = os.path.join(baai_dir, "test_qrels.jsonl")
+
+    # build_baai_eval_ds(query_path, corpus_path, qrels_path,
+    #                    baai_corpus_path, baai_queries_path, baai_qrels_path,
+    #                    qrel_num_cols=4, relevance_range=[2, 3])
