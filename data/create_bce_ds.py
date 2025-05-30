@@ -8,6 +8,7 @@ from rank_bm25 import BM25Okapi
 from tqdm import tqdm
 import os
 import sys
+from typing import List, Dict, Set
 
 def configure_python_path():
     project_root = os.path.abspath(
@@ -25,7 +26,242 @@ from src.utils.retrieval_utils import get_legal_dataset, get_legal_queries
 
 # utility to load qid lists
 def load_qids(path):
-    return set(pd.read_csv(path, header=None)[0].tolist())
+    df = pd.read_csv(path, header=None, usecols=[0], dtype={0: str})
+    return set(df[0].tolist())
+
+
+def chunk_text(
+    text: str,
+    max_length: int,
+    stride: int = None
+) -> List[str]:
+    """
+    Split text into overlapping chunks of at most `max_length` tokens.
+
+    If `stride` is not provided, defaults to 50% overlap (max_length // 2).
+
+    Parameters
+    ----------
+    text : str
+        The full document text.
+    max_length : int
+        Maximum number of tokens per chunk.
+    stride : int, optional
+        Number of tokens to advance for each new chunk.
+
+    Returns
+    -------
+    List[str]
+        List of text chunks.
+    """
+    tokens = text.split()
+    if stride is None:
+        stride = max_length // 2
+    chunks = [
+        " ".join(tokens[i : i + max_length])
+        for i in range(0, len(tokens), stride)
+        if tokens[i : i + max_length]
+    ]
+    return chunks
+
+
+def build_ce_dataset_chunked(
+    qrels_path: str,
+    pos_labels: List[int],
+    neg_labels: List[int],
+    corpus_path: str,
+    queries_path: str,
+    output_path: str,
+    max_length: int,
+    stride: int = None,
+    qid_filter: Set[str] = None,
+    neg_ratio: int = 6,
+    med_cap: int = 3,
+    med_offset: int = 10,
+    med_top_k: int = 150,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """
+    Create a binary-label cross-encoder dataset with overlapping chunking.
+
+    Documents are split into chunks of up to `max_length` tokens with
+    a sliding window of `stride` tokens (default 50% overlap).
+
+    Query and document IDs are consistently handled as strings.
+
+    Parameters
+    ----------
+    qrels_path : str
+        Path to TSV with columns [qid, run, doc_id, label].
+    pos_labels : list of int
+        Labels treated as positives.
+    neg_labels : list of int
+        Labels treated as annotated negatives.
+    corpus_path : str
+        Path to JSON mapping doc_id to document text.
+    queries_path : str
+        Path to CSV with ['topic_id', 'Query'] columns.
+    output_path : str
+        Destination TSV file (qid, chunk_id, label).
+    max_length : int
+        Maximum token length per document chunk.
+    stride : int, optional
+        Tokens to slide between chunks. Defaults to max_length // 2.
+    qid_filter : set of str, optional
+        If provided, only include these query IDs.
+    neg_ratio : int, optional
+        Number of negatives per positive (default 6).
+    med_cap : int, optional
+        Max BM25 negatives per positive (default 3).
+    med_offset : int, optional
+        BM25 ranking offset (default 10).
+    med_top_k : int, optional
+        BM25 top-k window size (default 150).
+    seed : int, optional
+        Random seed (default 42).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns ['qid', 'chunk_id', 'label'].
+    """
+    random.seed(seed)
+
+    # 1) Load relevance judgments as strings
+    df_q = pd.read_csv(
+        qrels_path, sep="\t", header=None,
+        names=["qid", "run", "doc_id", "label"]
+    )
+    df_q["qid"] = df_q["qid"].astype(str)
+    df_q["doc_id"] = df_q["doc_id"].astype(str)
+
+    positives = (
+        df_q[df_q.label.isin(pos_labels)]
+        .groupby("qid")["doc_id"].apply(list).to_dict()
+    )
+    annotated_negs = (
+        df_q[df_q.label.isin(neg_labels)]
+        .groupby("qid")["doc_id"].apply(list).to_dict()
+    )
+
+    # 2) Load and chunk corpus with doc_id as string
+    raw_ids, docs = get_legal_dataset(corpus_path)
+    corpus = {str(did): text for did, text in zip(raw_ids, docs)}
+
+    chunk_map: Dict[str, str] = {}
+    chunk_texts: Dict[str, str] = {}
+
+    for doc_id, text in tqdm(corpus.items(), desc="Chunking docs"):
+        for idx, chunk in enumerate(chunk_text(text, max_length, stride)):
+            cid = f"{doc_id}__chunk{idx}"
+            chunk_map[cid] = doc_id
+            chunk_texts[cid] = chunk
+
+    chunk_ids = list(chunk_texts.keys())
+    tokenized_chunks = [chunk_texts[cid].split() for cid in chunk_ids]
+    bm25 = BM25Okapi(tokenized_chunks)
+
+    # 3) Load queries with qid as string
+    raw_qids, queries = get_legal_queries(queries_path)
+    qids = [str(q) for q in raw_qids]
+    query_dict = dict(zip(qids, queries))
+
+    rows = []
+    n_annotated = n_medium = n_easy = 0
+
+    for qid, q_text in tqdm(query_dict.items(), desc="Processing queries"):
+        if qid_filter and qid not in qid_filter:
+            continue
+
+        pos_docs = positives.get(qid, [])
+        if not pos_docs:
+            continue
+
+        pos_chunk_ids = [
+            cid for cid, did in chunk_map.items() if did in pos_docs
+        ]
+
+        desired_neg = neg_ratio * len(pos_chunk_ids)
+        if desired_neg == 0:
+            desired_neg = len(annotated_negs.get(qid, []))
+
+        hard_docs = annotated_negs.get(qid, [])
+        hard_chunk_ids = [
+            cid for cid, did in chunk_map.items() if did in hard_docs
+        ]
+
+        if len(hard_chunk_ids) >= desired_neg:
+            hard_used = random.sample(hard_chunk_ids, desired_neg)
+            med_used = []
+            easy_used = []
+        else:
+            hard_used = hard_chunk_ids.copy()
+            rem = desired_neg - len(hard_used)
+
+            # Medium negatives via BM25
+            tok_q = q_text.split()
+            scores = bm25.get_scores(tok_q)
+            ranked_idx = sorted(
+                range(len(scores)), key=lambda i: scores[i], reverse=True
+            )
+            med_candidates = [
+                chunk_ids[i] for i in ranked_idx[med_offset : med_offset + med_top_k]
+                if chunk_map[chunk_ids[i]] not in pos_docs
+                and chunk_ids[i] not in hard_used
+            ]
+            m_needed = min(med_cap * len(pos_chunk_ids), rem)
+            med_used = med_candidates[:m_needed]
+            rem -= len(med_used)
+
+            # Easy negatives by query-term exclusion
+            q_terms = {t for t in tok_q if len(t) > 3}
+            easy_candidates = [
+                cid for cid in chunk_ids
+                if chunk_map[cid] not in pos_docs
+                and cid not in hard_used
+                and cid not in med_used
+                and all(t.lower() not in chunk_texts[cid].lower() for t in q_terms)
+            ]
+            take = min(rem, len(easy_candidates))
+            easy_used = random.sample(easy_candidates, take) if take > 0 else []
+            rem -= len(easy_used)
+
+            # Fallback negatives
+            if rem > 0:
+                fallback = [
+                    cid for cid in chunk_ids
+                    if chunk_map[cid] not in pos_docs
+                    and cid not in hard_used
+                    and cid not in med_used
+                    and cid not in easy_used
+                ]
+                fb_take = min(rem, len(fallback))
+                fb = random.sample(fallback, fb_take) if fb_take > 0 else []
+                easy_used.extend(fb)
+                rem -= len(fb)
+                if rem > 0:
+                    print(f"[WARN] qid {qid}: short {rem} negatives")
+
+        n_annotated += len(hard_used)
+        n_medium += len(med_used)
+        n_easy += len(easy_used)
+
+        rows.extend((qid, cid, 1) for cid in pos_chunk_ids)
+        rows.extend((qid, cid, 0) for cid in hard_used + med_used + easy_used)
+
+    # 4) Save output
+    df_out = pd.DataFrame(rows, columns=["qid", "chunk_id", "label"])
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    df_out.to_csv(output_path, sep="\t", index=False)
+
+    print(f"[✓] Written {len(df_out)} rows to {output_path}")
+    print(
+        f"Negatives breakdown: annotated={n_annotated}, "
+        f"medium={n_medium}, easy={n_easy}"
+    )
+    print(f"Total positives={len(df_out[df_out.label == 1])}")
+
+    return df_out
 
 
 def build_ce_dataset(
@@ -100,7 +336,7 @@ def build_ce_dataset(
     # 2) Load corpus and build BM25 index
     doc_ids, docs = get_legal_dataset(corpus_path)
     # corpus is a mapping of doc_id -> full document text
-    corpus = {doc_id: doc for doc_id, doc in zip(doc_ids, docs)}
+    corpus = dict(zip(doc_ids, docs))
     
     tokenized_docs = [corpus[d].split() for d in tqdm(doc_ids, desc="Tokenizing corpus")]
     print("Building BM25 index...")
@@ -211,9 +447,9 @@ def main_create_scenario_datasets():
     """
     base = Path(STORAGE_DIR) / "legal_ir" / "data"
     # ann  = base / "annotations" / "qrels_py.tsv"
-    ann  = base / "annotations" / "qrels_synthetic_mistral-small-2501_filtered.tsv"
-    corp = base / "corpus" / "corpus_py.csv"
-    qry  = base / "corpus" / "consultas_sinteticas_380_filtered.tsv"
+    ann  = base / "annotations" / "inpars_mistral-small-2501_qrels_Q1.tsv"
+    corp = base / "corpus" / "corpus.jsonl"
+    qry  = base / "corpus" / "inpars_mistral-small-2501_queries_Q1.tsv"
     out  = base / "datasets" / "cross_encoder"
     out.mkdir(parents=True, exist_ok=True)
 
@@ -266,17 +502,30 @@ def main_create_scenario_datasets():
     #             seed=seed
     #         )
     
-    train_qids = load_qids(base / "qids_synthetic_train.txt")
-    dev_qids   = load_qids(base / "qids_synthetic_dev.txt")
-    test_qids  = load_qids(base / "qids_synthetic_test.txt")
+    train_qids = load_qids(base / "qids_inpars_train.txt")
+    dev_qids   = load_qids(base / "qids_inpars_dev.txt")
+    test_qids  = load_qids(base / "qids_inpars_test.txt")
     for split_name, qids in [("train", train_qids), ("dev", dev_qids), ("test", test_qids)]:
-        build_ce_dataset(
+        # build_ce_dataset(
+        #     qrels_path=str(ann),
+        #     pos_labels=[1],
+        #     neg_labels=[0],
+        #     corpus_path=str(corp),
+        #     queries_path=str(qry),
+        #     output_path=str(out / f"bce_6x_synthetic_{split_name}.tsv"),
+        #     qid_filter=qids,
+        #     neg_ratio=6,
+        #     seed=seed
+        # )
+        build_ce_dataset_chunked(
             qrels_path=str(ann),
             pos_labels=[1],
             neg_labels=[0],
             corpus_path=str(corp),
             queries_path=str(qry),
-            output_path=str(out / f"bce_6x_synthetic_{split_name}.tsv"),
+            output_path=str(out / f"bce_6x_inpars_chunked_{split_name}.tsv"),
+            max_length=512,
+            stride=256,
             qid_filter=qids,
             neg_ratio=6,
             seed=seed

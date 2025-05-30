@@ -196,11 +196,13 @@ def main(path_to_reference, path_to_candidate):
     """Command line:
     python msmarco_eval_ranking.py <path to reference> <path_to_candidate_file>
     """
-    metrics = compute_metrics_from_files(path_to_reference, path_to_candidate)
-    print('#####################')
-    for metric in sorted(metrics):
-        print('{}: {}'.format(metric, metrics[metric]))
-    print('#####################')
+    for path in path_to_candidate:
+        metrics = compute_metrics_from_files(path_to_reference, path)
+        print("MRR for path:", path)
+        print('#####################')
+        for metric in sorted(metrics):
+            print('{}: {}'.format(metric, metrics[metric]))
+        print('#####################')
 
 if __name__ == '__main__':
     main()

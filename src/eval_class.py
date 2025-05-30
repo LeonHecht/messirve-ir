@@ -35,6 +35,7 @@ from src.utils.retrieval_utils import (
     get_eval_metrics,
     create_results_file,
     get_legal_dataset,
+    get_legal_dataset_norm,
     get_legal_queries,
     create_predictions_file,
     embed_chunkwise,
@@ -42,7 +43,8 @@ from src.utils.retrieval_utils import (
     chunk_by_paragraphs,
     embed_bge_sparse,
     embed_bge_sliding_window,
-    rerank_cross_encoder_chunked
+    rerank_cross_encoder_chunked,
+    retrieve_exact_match
 )
 
 from src.utils.train_utils import (
@@ -154,15 +156,16 @@ class Evaluator:
             print("Number of docs:", len(self.docs))
             # rel_doc_ids = qrels_dev_df["doc_id"].unique()
 
-        elif self.ds in ("legal-57", "legal-inpars", "legal-synthetic"):
-            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_py.csv"))
+        elif self.ds in ("legal-54", "legal-inpars", "legal-synthetic"):
+            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl"))
+            # self.doc_ids, self.docs = get_legal_dataset_norm(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl"), normalize=True)
             # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_raw_google_ocr.csv"))
-            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_Gpt4o-mini_cleaned.json"))
+            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_Gpt4o-mini_cleaned.jsonl"))
             self.doc_dict = {doc_id: doc for doc_id, doc in zip(self.doc_ids, self.docs)}
             
-            if self.ds == "legal-57":
-                queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_57.tsv")
-                self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "qrels_py.tsv")
+            if self.ds == "legal-54":
+                queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_54.tsv")
+                self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "qrels_54.tsv")
                 test_qids_path = None
             elif self.ds == "legal-inpars":
                 queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "inpars_mistral-small-2501_queries.tsv")
@@ -234,7 +237,7 @@ class Evaluator:
         model_mapping = {
             "bm25": lambda: retrieve_bm25(self.docs, self.queries, self.doc_ids, self.query_ids),
             "bge-sliding": lambda: embed_bge_sliding_window(
-                get_bge_m3_model('BAAI/bge-m3'),
+                get_bge_m3_model('BAAI/bge-m3') if self.checkpoint is None else get_bge_m3_model(self.checkpoint),
                 self.doc_dict, self.query_dict, self.reuse_run
             ),
             "bge": lambda: embed_bge(
@@ -262,7 +265,8 @@ class Evaluator:
             "qwen": lambda: embed_qwen(
                 self.model_instance, self.tokenizer, self.docs, self.queries, self.doc_ids, self.query_ids
             ),
-            "bge-chunkwise": lambda: embed_chunkwise(get_bge_m3_model('BAAI/bge-m3'), get_sim_bge, self.docs, self.queries, self.doc_ids, self.query_ids, chunk_func=chunk_by_paragraphs, window_size=256)
+            "bge-chunkwise": lambda: embed_chunkwise(get_bge_m3_model('BAAI/bge-m3'), get_sim_bge, self.docs, self.queries, self.doc_ids, self.query_ids, chunk_func=chunk_by_paragraphs, window_size=256),
+            "exact-match": lambda: retrieve_exact_match(self.docs, self.queries, self.doc_ids, self.query_ids),
         }
 
         if self.model_name not in model_mapping:
@@ -282,10 +286,10 @@ class Evaluator:
         # self.write_run_to_tsv(qid="1", out_path="run_Q1_before.tsv")
         # for each query rerank the top 100 docs
         if self.rerank_chunkwise:
-            self.run = rerank_cross_encoder_chunked(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 100, self.query_dict, self.doc_dict,
+            self.run = rerank_cross_encoder_chunked(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 50, self.query_dict, self.doc_dict,
                                                     max_length=self.max_length, stride=self.max_length//2, aggregator="top3")
         else:
-            self.run = rerank_cross_encoder(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 100, self.query_dict, self.doc_dict,
+            self.run = rerank_cross_encoder(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 50, self.query_dict, self.doc_dict,
                                     max_length=self.max_length)
         self.write_run_to_tsv(qid="1", out_path="run_Q1_after.tsv")
 
@@ -296,9 +300,15 @@ class Evaluator:
         print(f"QREL queries:  {len(ref_qids)}")
         print(f"Intersection:  {len(run_qids & ref_qids)}")
         self.metrics = get_eval_metrics(self.run, self.qrels_dev_df, self.doc_ids, self.metric_names)
-        create_results_file(self.run)
-        create_predictions_file(self.run)   # create TREC style qrel file (contains same info as results.txt)
-        msmarco_eval_ranking.main(self.path_to_reference_qrels, "results.txt")
+        result_paths = create_results_file(self.run)
+        prediction_paths = create_predictions_file(self.run)   # create TREC style qrel file (contains same info as results.txt)
+        if type(result_paths) == str:
+            msmarco_eval_ranking.main(self.path_to_reference_qrels, [result_paths])
+        elif type(result_paths) == list:
+            msmarco_eval_ranking.main(self.path_to_reference_qrels, result_paths)
+        else:
+            raise Exception("Invalid result paths")
+
 
     def create_run_df(self, run, top_k=5):
         """
@@ -385,10 +395,9 @@ def main():
     model_save_path = "/media/discoexterno/leon/ms_marco_passage/results/IR_unsloth_qwen0.5_5negs_rslora_100k/saved_model"
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        # model_save_path,
         model_save_path,
-        max_seq_length = 150,
-        dtype = "bf16",
+        max_seq_length = 1024,
+        dtype = torch.bfloat16,
         load_in_4bit = False
     )
 
@@ -408,13 +417,28 @@ def main():
     #     tokenizer.pad_token_id = tokenizer_unsloth.pad_token_id
     #     model.resize_token_embeddings(len(tokenizer))
     # run("qwen", metrics={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'}, ds="msmarco", model_instance=model, tokenizer=tokenizer, reuse_run=False)
-    evaluator = Evaluator(ds="msmarco",
-                          model_name="jina",
-                          metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
-                          model_instance=model,
-                          tokenizer=tokenizer,
-                          limit=10_000
-                )
+    
+    # evaluator = Evaluator(ds="msmarco",
+    #                       model_name="jina",
+    #                       metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
+    #                       model_instance=model,
+    #                       tokenizer=tokenizer,
+    #                       limit=10_000
+    #             )
+    evaluator = Evaluator(
+        ds="legal-54",
+        model_name="qwen",
+        metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
+        model_instance=model,
+        # checkpoint=model_path,
+        rerank=False,
+        # reranker_model=model,
+        tokenizer=tokenizer,
+        # max_length=512,
+        # rerank_chunkwise=True,
+        # reranker_model_type="binary"
+    )
+
     evaluator.evaluate()
 
 
@@ -434,29 +458,30 @@ if __name__ == "__main__":
     #             )
     # evaluator.evaluate()
 
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification
-    # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
-    # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
-    model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_synthetic_6x"
-    # model = AutoModelForSequenceClassification.from_pretrained(model_path)
-    # tokenizer = AutoTokenizer.from_pretrained(model_path)
+    # from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    # # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
+    # # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
+    # # model_path = "dariolopez/bge-m3-es-legal-tmp-6"
+    # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_full_chunked_6x"
+    # # model = AutoModelForSequenceClassification.from_pretrained(model_path)
+    # # tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-    # Evaluate IR metrics.
-    evaluator = Evaluator(
-        ds="legal-57",
-        model_name="bge",
-        metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
-        rerank=False,
-        # model_instance=model,
-        checkpoint=model_path,
-        # reranker_model=reranker_model,
-        # tokenizer=tokenizer,
-        # max_length=512,
-        # rerank_chunkwise=False,
-        # reranker_model_type="bge"
-    )
-    evaluator.evaluate()
+    # # Evaluate IR metrics.
+    # evaluator = Evaluator(
+    #     ds="legal-synthetic",
+    #     model_name="bm25",
+    #     metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
+    #     # model_instance=model,
+    #     # checkpoint=model_path,
+    #     rerank=False,
+    #     # reranker_model=model,
+    #     # tokenizer=tokenizer,
+    #     # max_length=512,
+    #     # rerank_chunkwise=True,
+    #     # reranker_model_type="binary"
+    # )
+    # evaluator.evaluate()
 
-    # main()
+    main()
     # model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
     # model = SentenceTransformer("sentence-transformers/all-MiniLM-L12-v2")

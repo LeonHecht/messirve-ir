@@ -447,7 +447,7 @@ def embed_bge_sliding_window(model, doc_dict, query_dict, reuse_run):
         Mapping from run name to retrieval result dict.
     """
     # sliding window parameters
-    chunk_size = 1024
+    chunk_size = 512
     stride     = 256
 
     doc_ids = list(doc_dict.keys())
@@ -515,7 +515,9 @@ def embed_bge_sliding_window(model, doc_dict, query_dict, reuse_run):
             if pooling_strategy == "max":
                 sim[:, j], _ = raw_sim[:, idxs].max(dim=1)
             elif pooling_strategy == "top_3":
-                vals, _ = raw_sim[:, idxs].topk(3, dim=1)
+                k = min(3, len(idxs))
+                if k < 3: print(f"Warning: fewer than 3 chunks for doc {did}.")
+                vals, _ = raw_sim[:, idxs].topk(k, dim=1)
                 sim[:, j] = vals.mean(dim=1)
     print("Done.")
 
@@ -1257,6 +1259,30 @@ def embed_s_transformers_faiss(
     return run
 
 
+def retrieve_exact_match(docs, queries, doc_ids, query_ids):
+    """
+    Embed the queries and documents using the exact match model and compute the similarity between queries and documents.
+
+    Args:
+        docs (dict): Dictionary with document_id as key and text as value.
+        queries (list): List of queries.
+        doc_ids (list): List of document IDs.
+        query_ids (list): List of query IDs.
+
+    Returns:
+        dict: Dictionary with query as key and a list of tuples of (similarity, document text, doc_id) as value.
+    """
+    run = {}
+    for qid, query in zip(query_ids, queries):
+        run[qid] = {}
+        for did, doc in zip(doc_ids, docs):
+            if query in doc:
+                run[qid][did] = 1.0
+            else:
+                run[qid][did] = 0.0
+    return run
+
+
 def retrieve_bm25(docs, queries, doc_ids, query_ids):
     """
     Embed the queries and documents using the BM25 model and compute the similarity between queries and documents.
@@ -1374,13 +1400,16 @@ def rerank_cross_encoder_chunked(model,
     dict
         Merged run mapping each query_id → {doc_id: aggregated_score}.
     """
+    device = torch.device("cuda")
     # instantiate or prepare model exactly as in your normal reranker
     if model_type == "bge":
         from FlagEmbedding import FlagLLMReranker
         model = FlagLLMReranker('BAAI/bge-reranker-v2-gemma', use_bf16=True)
+        tokenizer = AutoTokenizer.from_pretrained('BAAI/bge-reranker-v2-gemma')
     elif model_type == "sbert":
         from sentence_transformers import CrossEncoder
         model = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
+        tokenizer = AutoTokenizer.from_pretrained('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.to(device)
@@ -1468,6 +1497,9 @@ def rerank_cross_encoder_chunked(model,
             elif aggregator == "top3":
                 top3 = sorted(chunk_scores, reverse=True)[:3]
                 agg_score = sum(top3) / len(top3)
+            elif aggregator == "top10":
+                top10 = sorted(chunk_scores, reverse=True)[:10]
+                agg_score = sum(top10) / len(top10)
             else:
                 raise ValueError(f"Unknown aggregator: {aggregator}")
             reranked_run[qid][doc_id] = float(agg_score)
@@ -1515,8 +1547,8 @@ def rerank_cross_encoder(model, model_type, tokenizer, run, top_k, query_dict, d
     """
     if model_type == "bge":
         from FlagEmbedding import FlagLLMReranker
-        model = FlagLLMReranker('BAAI/bge-reranker-v2-m3', use_bf16=False)
-        # model = FlagLLMReranker('BAAI/bge-reranker-v2-gemma', use_bf16=False)
+        # model = FlagLLMReranker('BAAI/bge-reranker-v2-m3', use_bf16=False)
+        model = FlagLLMReranker('BAAI/bge-reranker-v2-gemma', use_bf16=False)
     elif model_type == "sbert":
         from sentence_transformers import CrossEncoder
         model = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
@@ -1572,8 +1604,8 @@ def get_eval_metrics(run, qrels_dev_df, all_docids, metrics):
     # check instance of run
     if len(run) < 10:
         metrics_all = {}
-        for run_name, run in run.items():
-            results = evaluator.evaluate(run)
+        for run_name, run_ in run.items():
+            results = evaluator.evaluate(run_)
     
             result_values = list(results.values())
             metric_names = list(result_values[0].keys())      # because some result names change e.g. from ndcg_cut.10 to ndcg_cut_10
@@ -1587,7 +1619,7 @@ def get_eval_metrics(run, qrels_dev_df, all_docids, metrics):
             
             metrics_all[run_name] = avg_metrics
 
-            print("\nResults:")
+            print(f"\nResults for {run_name}:")
             for metric_name, metric_value in avg_metrics.items():
                 print(f"Average {metric_name}: {metric_value}")
 
@@ -1625,15 +1657,30 @@ def create_results_file(run):
     run[str(query_ids[i])] = {str(doc_ids[j]): float(query_sim[j]) for j in range(len(doc_ids))}
     {query_id: {doc_id: similarity, ...}, ...}
     """
-    # sort run dict by similarity
-    for query_id in run:
-        run[query_id] = dict(sorted(run[query_id].items(), key=lambda x: x[1], reverse=True)[:10])
+    if len(run) > 10:
+        # sort run dict by similarity
+        for query_id in run:
+            run[query_id] = dict(sorted(run[query_id].items(), key=lambda x: x[1], reverse=True)[:10])
+        
+        with open("results.txt", "w") as f:
+            for query_id, doc_dict in run.items():
+                for i, (doc_id, similarity) in enumerate(doc_dict.items()):
+                    f.write(f"{query_id}\t{doc_id}\t{i+1}\n")
+        return "results.txt"
+    else:
+        out_paths = []
+        for type_, type_run in run.items():
+            for query_id in type_run:
+                type_run[query_id] = dict(sorted(type_run[query_id].items(), key=lambda x: x[1], reverse=True)[:10])
+            
+            out_path = f"results_{type_}.txt"
+            out_paths.append(out_path)
+            with open(out_path, "w") as f:
+                for query_id, doc_dict in type_run.items():
+                    for i, (doc_id, similarity) in enumerate(doc_dict.items()):
+                        f.write(f"{query_id}\t{doc_id}\t{i+1}\n")
+        return out_paths
     
-    with open("results.txt", "w") as f:
-        for query_id, doc_dict in run.items():
-            for i, (doc_id, similarity) in enumerate(doc_dict.items()):
-                f.write(f"{query_id}\t{doc_id}\t{i+1}\n")
-
 
 def create_predictions_file(run, run_id="my_run"):
     """
@@ -1660,14 +1707,32 @@ def create_predictions_file(run, run_id="my_run"):
     None
         Writes the results to a file named "predictions.tsv".
     """
-    with open("predictions.tsv", "w") as f:
-        for query_id, doc_scores in run.items():
-            # Sort documents by score in descending order and take top 10
-            sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:10]
-            for rank, (doc_id, score) in enumerate(sorted_docs, start=1):
-                # Write in TREC format: query_id, Q0, doc_id, rank, score, run_id
-                f.write(f"{query_id}\tQ0\t{doc_id}\t{rank}\t{score:.4f}\t{run_id}\n")
+    if len(run) > 10:
+        with open("predictions.tsv", "w") as f:
+            for query_id, doc_scores in run.items():
+                # Sort documents by score in descending order and take top 10
+                sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:10]
+                for rank, (doc_id, score) in enumerate(sorted_docs, start=1):
+                    # Write in TREC format: query_id, Q0, doc_id, rank, score, run_id
+                    f.write(f"{query_id}\tQ0\t{doc_id}\t{rank}\t{score:.4f}\t{run_id}\n")
+        return "predictions.tsv"
+    else:
+        out_paths = []
+        for type_, type_run in run.items():
+            out_path = f"predictions_{type_}.tsv"
+            out_paths.append(out_path) 
+            with open(f"predictions_{type_}.tsv", "w") as f:
+                for query_id, doc_scores in type_run.items():
+                    # Sort documents by score in descending order and take top 10
+                    sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:10]
+                    for rank, (doc_id, score) in enumerate(sorted_docs, start=1):
+                        # Write in TREC format: query_id, Q0, doc_id, rank, score, run_id
+                        f.write(f"{query_id}\tQ0\t{doc_id}\t{rank}\t{score:.4f}\t{run_id}\n")
+        return out_paths
+    
 
+import re
+import unicodedata
 import json
 def get_legal_dataset(path):
     """
@@ -1685,21 +1750,109 @@ def get_legal_dataset(path):
         with open(path, 'r', encoding='utf-8') as f:
             corpus_dict = json.load(f)
         df = pd.DataFrame(list(corpus_dict.items()), columns=["Codigo", "text"])
-    elif path.endswith(".csv"):
+        # rename columns
+        df.rename(columns={"Codigo": "id"}, inplace=True)
+    elif path.endswith(".jsonl"):
         # Load the dataset
-        df = pd.read_csv(path, usecols=["Codigo", "text"])
-    # convert Codigo column to list
-    print("Codigo dtype", df["Codigo"].dtype)
+        with open(path, 'r', encoding='utf-8') as f:
+            corpus_dict = [json.loads(line) for line in f]
+        df = pd.DataFrame(corpus_dict)
+    else:
+        raise ValueError("Path must end with .json or .jsonl")
     # convert Codigo column datatype to str
-    df["Codigo"] = df["Codigo"].astype(str)
-    print("Codigo dtype", df["Codigo"].dtype)
-    return df["Codigo"].tolist(), df["text"].tolist()
+    df["id"] = df["id"].astype(str)
+    return df["id"].tolist(), df["text"].tolist()
+
+
+
+# tqdm integration with pandas
+tqdm.pandas()
+
+def strip_accents(text: str) -> str:
+    """
+    Remove accents from a string using Unicode normalization.
+
+    Parameters
+    ----------
+    text : str
+        Input string.
+
+    Returns
+    -------
+    str
+        String without accents.
+    """
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', text)
+        if unicodedata.category(c) != 'Mn'
+    )
+
+
+def normalize_token(tok: str) -> str:
+    """
+    Normalize a token by lowercasing, stripping accents, and removing non-letters.
+
+    Parameters
+    ----------
+    tok : str
+        Token to normalize.
+
+    Returns
+    -------
+    str
+        Normalized token.
+    """
+    tok = strip_accents(tok.lower())
+    return re.sub(r'[^a-zA-Z]', '', tok)
+
+
+def get_legal_dataset_norm(path: str, normalize: bool = False) -> tuple[list[str], list[str]]:
+    """
+    Load a legal dataset from a JSON or JSONL file and optionally lemmatize and normalize the text.
+
+    Parameters
+    ----------
+    path : str
+        Path to the dataset file (.json or .jsonl).
+    lemmatize : bool, optional
+        Whether to apply lemmatization to the text (default: False).
+    normalize : bool, optional
+        Whether to apply token-level normalization to the text (default: False).
+
+    Returns
+    -------
+    tuple[list[str], list[str]]
+        Tuple with list of document IDs and list of corresponding processed texts.
+    """
+    if path.endswith(".json"):
+        with open(path, 'r', encoding='utf-8') as f:
+            corpus_dict = json.load(f)
+        df = pd.DataFrame(list(corpus_dict.items()), columns=["id", "text"])
+    elif path.endswith(".jsonl"):
+        with open(path, 'r', encoding='utf-8') as f:
+            records = [json.loads(line) for line in f]
+        df = pd.DataFrame(records)
+        if "Codigo" in df.columns:
+            df.rename(columns={"Codigo": "id"}, inplace=True)
+    else:
+        raise ValueError("Path must end with .json or .jsonl")
+
+    df["id"] = df["id"].astype(str)
+
+    if normalize:
+        print("Normalizing text...")
+        df["text"] = df["text"].progress_apply(
+            lambda x: " ".join(normalize_token(tok) for tok in x.split())
+            if isinstance(x, str) else x
+        )
+
+    return df["id"].tolist(), df["text"].tolist()
 
 
 def get_legal_queries(path):
     if not path.endswith(".tsv"):
         raise ValueError("Path must end with .tsv")
-    df = pd.read_csv(path, sep="\t", header=0, names=["topic_id", "Query"])
+    df = pd.read_csv(path, sep="\t", header=0, names=["id", "query"])
     # convert topic_id column to list
-    df["topic_id"] = df["topic_id"].astype(str)
-    return df["topic_id"].tolist(), df["Query"].tolist()
+    df["id"] = df["id"].astype(str)
+    return df["id"].tolist(), df["query"].tolist()

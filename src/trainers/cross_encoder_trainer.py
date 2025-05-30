@@ -49,6 +49,7 @@ configure_python_path()
 
 from config.config import STORAGE_DIR
 from src.utils.log_experiment import log_csv, log_md, log_plot
+from src.utils.retrieval_utils import get_legal_queries, get_legal_dataset
 from src.eval_class import Evaluator
 
 
@@ -456,30 +457,11 @@ class CrossEncoderTrainer:
             "f1": f1,
         }
     
-    def set_dataset_dicts(self, corpus_path):
-        if corpus_path.endswith(".csv"):
-            # open corpus_py.csv with pandas
-            corpus = pd.read_csv(corpus_path, usecols=["Codigo", "text"])
-            # convert codigo column to string
-            corpus["Codigo"] = corpus["Codigo"].astype(str)
-            docid_to_text = dict(zip(corpus["Codigo"], corpus["text"]))
-
-        elif corpus_path.endswith(".json"):
-            # Load corpus from JSON file.
-            with open(corpus_path, 'r', encoding='utf-8') as f:
-                docid_to_text = json.load(f)
-            
-        self.doc_dict = docid_to_text
-
-        # open queries_57.csv with pandas
-        # queries = pd.read_csv(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_53.csv"), usecols=["topic_id", "Query"])
-        queries = pd.read_csv(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "inpars_mistral-small-2501_queries_Q1.tsv"), header=None, sep="\t", names=["topic_id", "Query"])
-        # convert topic_id column to string
-        queries["topic_id"] = queries["topic_id"].astype(str)
-
-        # create a dictionary with topic_id as key and query as value
-        qid_to_query = dict(zip(queries["topic_id"], queries["Query"]))
-        self.query_dict = qid_to_query
+    def set_dataset_dicts(self, corpus_path, queries_path):
+        dids, docs = get_legal_dataset(corpus_path)
+        self.doc_dict = dict(zip(dids, docs))
+        qids, queries = get_legal_queries(queries_path)
+        self.query_dict = dict(zip(qids, queries))
 
     def tokenize_with_stride(self, examples):
         """
@@ -982,7 +964,7 @@ def main():
 
         # Update output_dir to include the learning rate in the folder name.
         hyperparameters["output_dir"] = os.path.join(
-            STORAGE_DIR, "legal_ir", "results", f"cross_encoder_weighted_stride_inpars_Q1_v5"
+            STORAGE_DIR, "legal_ir", "results", f"cross_encoder_weighted_stride_synthetic"
         )
 
         print(f"\n=== Running cross-encoder training with learning_rate = {lr} ===")
@@ -995,11 +977,13 @@ def main():
 
         if hyperparameters["corpus_type"] == "original":
             cross_encoder.set_dataset_dicts(
-                corpus_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_py.csv")
+                corpus_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl"),
+                queries_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "consultas_sinteticas_380_filtered.tsv")
             )        
         elif hyperparameters["corpus_type"] == "cleaned":
             cross_encoder.set_dataset_dicts(
-                corpus_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_Gpt4o-mini_cleaned.json")
+                corpus_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_Gpt4o-mini_cleaned.json"),
+                queries_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "consultas_sinteticas_380_filtered.tsv")
             )
 
         # Load and split the dataset
@@ -1013,9 +997,9 @@ def main():
             #     max_length=hyperparameters["max_length"]
             # )
 
-            ds_train_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_1x_inpars_train_Q1.tsv")
-            ds_dev_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_1x_inpars_dev_Q1.tsv")
-            ds_test_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_1x_inpars_test_Q1.tsv")
+            ds_train_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_6x_synthetic_train.tsv")
+            ds_dev_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_6x_synthetic_dev.tsv")
+            ds_test_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", f"bce_6x_synthetic_test.tsv")
             
             train_ds = cross_encoder.load_tsv_dataset(ds_train_path, max_length=hyperparameters["max_length"])
             val_ds = cross_encoder.load_tsv_dataset(ds_dev_path, max_length=hyperparameters["max_length"])
@@ -1058,11 +1042,12 @@ def main():
 
         # Evaluate IR metrics.
         evaluator = Evaluator(
-            ds="legal",
+            ds="legal-54",
             model_name="bm25",
             metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
             rerank=True,
             reranker_model=cross_encoder.model,
+            reranker_model_type="binary",
             tokenizer=cross_encoder.tokenizer,
             max_length=hyperparameters["max_length"],
             rerank_chunkwise=hyperparameters["use_stride"],

@@ -4,6 +4,7 @@ import random
 from datasets import load_from_disk, load_dataset
 from transformers import TrainingArguments
 import torch
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from datasets import Dataset, concatenate_datasets
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoProcessor
 from unsloth import FastLanguageModel
@@ -13,7 +14,6 @@ import json
 import pandas as pd
 import uuid
 import sys
-# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 def configure_python_path():
     """
     Add the project root directory to sys.path.
@@ -49,7 +49,8 @@ from src.utils.train_utils import (
     get_msmarco_passages,
     get_msmarco_hard_negatives,
     tokenize_train_ds_msmarco,
-    tokenize_test_ds_msmarco
+    tokenize_test_ds_msmarco,
+    tokenize_ds_legal
 )
 from src.utils.retrieval_utils import (
     get_legal_dataset,
@@ -97,19 +98,76 @@ def log_experiment(trainer, training_args, model_checkpoint, exp_id, dataset_nam
         log_plot(exp_dir, exp_id, training_results)
 
 
+def convert_jsonl_to_hf_dataset(jsonl_path: str) -> Dataset:
+    """
+    Convert a JSONL file into a HuggingFace Dataset.
+
+    Parameters
+    ----------
+    jsonl_path : str
+        Path to the input JSONL file. Each line must be a JSON object with
+        keys: 'query', 'pos', 'neg', 'pos_scores', 'neg_scores', 'prompt',
+        and 'type'.
+
+    Returns
+    -------
+    Dataset
+        A HuggingFace Dataset with columns:
+        - 'query' (str)
+        - 'positive' (str or None)
+        - 'negative_1', 'negative_2', ..., up to the max number of negatives.
+    """
+    rows = []
+    max_negatives = 0
+
+    with open(jsonl_path, 'r', encoding='utf-8') as infile:
+        for line in infile:
+            entry = json.loads(line)
+            query = entry.get('query')
+            pos_list = entry.get('pos', [])
+            positive = pos_list[0] if pos_list else None
+
+            negatives = entry.get('neg', [])
+            max_negatives = max(max_negatives, len(negatives))
+
+            row = {
+                'query': query,
+                'positive': positive,
+            }
+            for j, neg in enumerate(negatives, start=1):
+                row[f'negative_{j}'] = neg
+
+            rows.append(row)
+
+    # Pad missing negative_i fields with None for consistency
+    for row in rows:
+        for j in range(1, max_negatives + 1):
+            row.setdefault(f'negative_{j}', None)
+
+    return Dataset.from_list(rows)
+
+
 def make_dual_encoder_dataset(tsv_path: str,
                               neg_per_pos: int,
                               shuffle_negatives: bool = False,
                               seed: int = 42) -> Dataset:
+    
+    header = pd.read_csv(tsv_path, sep="\t", nrows=0).columns.tolist()
 
-    # 1. Load raw data
-    df = pd.read_csv(tsv_path, sep="\t", dtype={'qid': str, 'doc_id': str, 'label': int})
+    if "doc_id" in header:
+        doc_col = "doc_id"
+    elif "chunk_id" in header:
+        doc_col = "chunk_id"
+    else:
+        raise ValueError("TSV must contain either 'doc_id' or 'chunk_id' column.")
+
+    df = pd.read_csv(tsv_path, sep="\t", dtype={"qid": str, doc_col: str, "label": int})
 
     # 2. Build rows for new dataset
     all_rows = []
     for qid, sub in df.groupby('qid', sort=False):
-        positives = sub.loc[sub['label']==1, 'doc_id'].tolist()
-        negatives = sub.loc[sub['label']==0, 'doc_id'].tolist()
+        positives = sub.loc[sub['label']==1, doc_col].tolist()
+        negatives = sub.loc[sub['label']==0, doc_col].tolist()
 
         # sanity check: must exactly match your provided ratio
         total_negs = len(negatives)
@@ -177,32 +235,26 @@ def train():
 
         checkpoint = STORAGE_DIR + "/qwen-2-vec/run_89622_texts_1_epoch/output-model/checkpoint-2500"
     elif which == "legal":
-        train_ds = make_dual_encoder_dataset(
-            tsv_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", "bce_train.tsv"),
-            neg_per_pos=6,
-            shuffle_negatives=False,
-        )
-        dev_ds = make_dual_encoder_dataset(
-            tsv_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", "bce_dev.tsv"),
-            neg_per_pos=6,
-            shuffle_negatives=False,
+        ds = convert_jsonl_to_hf_dataset(
+            jsonl_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_inpars_synthetic_chunked_baai.jsonl"),
         )
         
-        test_ds = make_dual_encoder_dataset(
-            tsv_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "cross_encoder", "bce_test.tsv"),
-            neg_per_pos=6,
-            shuffle_negatives=False,
-        )
-        test_ds = concatenate_datasets([dev_ds, test_ds])
+        # Split the dataset into train and test sets
+        split = ds.train_test_split(test_size=0.1, seed=42)
+        train_ds = split["train"]
+        test_ds = split["test"]
+        print(f"Train dataset size: {len(train_ds)}")
+        print(f"Test dataset size: {len(test_ds)}")
 
         # train_ds = train_ds.select(range(100))
         # test_ds = test_ds.select(range(100))
 
-        query_ids, queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_57.csv"))
+        query_ids, queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "consultas_sinteticas_380_filtered.tsv"))
         qid_to_query = {query_id: query for query_id, query in zip(query_ids, queries)}
 
-        doc_ids, docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_py.csv"))
-        pid_to_passage = {doc_id: doc for doc_id, doc in zip(doc_ids, docs)}
+        query_ids2, queries2 = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "inpars_mistral-small-2501_queries_Q1.tsv"))
+        qid_to_query2 = {query_id: query for query_id, query in zip(query_ids2, queries2)}
+        qid_to_query.update(qid_to_query2)
 
         num_negs = 6
     else:
@@ -233,8 +285,8 @@ def train():
             # And also all Instruct versions and Math. Coding verisons!
             model_name = "unsloth/Qwen2.5-0.5B-Instruct",
             max_seq_length = MAX_DOC_LEN,
-            # dtype = torch.bfloat16,
-            load_in_4bit = True,
+            dtype = torch.bfloat16,
+            load_in_4bit = False,
             # device_map="cuda:1",
             # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
         )
@@ -244,7 +296,7 @@ def train():
 
         model = FastLanguageModel.get_peft_model(
             model,
-            r = 16, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
+            r = 64, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
             target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
                             "gate_proj", "up_proj", "down_proj",],
             lora_alpha = 16,
@@ -257,7 +309,7 @@ def train():
             loftq_config = None, # And LoftQ
         )
     
-    if which == "msmarco" or which == "legal":
+    if which == "msmarco":
         # Apply tokenization to the dataset
         train_ds = tokenize_train_ds_msmarco(tokenizer, train_ds, qid_to_query, pid_to_passage, num_negs, reuse=False)
         test_ds = tokenize_test_ds_msmarco(tokenizer, test_ds, qid_to_query, pid_to_passage, num_negs, reuse=False)
@@ -265,16 +317,20 @@ def train():
         # Apply tokenization to the dataset
         train_ds = train_ds.map(lambda x: tokenize_with_hard_negatives_messirve(tokenizer, x, append_eos=True), batched=True)
         test_ds = test_ds.map(lambda x: tokenize_with_hard_negatives_messirve(tokenizer, x, append_eos=True), batched=True)
+    elif which == "legal":
+        # Apply tokenization to the dataset
+        train_ds = tokenize_ds_legal(tokenizer, train_ds, num_negs)
+        test_ds = tokenize_ds_legal(tokenizer, test_ds, num_negs)
     else:
         raise ValueError("Dataset not supported")
 
     # output_dir = os.path.join(STORAGE_DIR, "ms_marco_passage", "results", "IR_unsloth_qwen0.5_5negs_rslora_50k_SFT_GPT")
-    output_dir = os.path.join(STORAGE_DIR, "legal_ir", "results", "legal_eos_dual_test")
+    output_dir = os.path.join(STORAGE_DIR, "legal_ir", "results", "legal_eos_full_synthetic")
     print("Output dir:", output_dir)
 
     batch_size = 2
-    gradient_accumulation_steps = 4
-    epochs = 10
+    gradient_accumulation_steps = 8
+    epochs = 1
 
     # Compute total steps given your dataset and hyperparameters
     total_steps = (len(train_ds) // (batch_size * gradient_accumulation_steps)) * epochs
@@ -291,7 +347,7 @@ def train():
         gradient_accumulation_steps=gradient_accumulation_steps,
         num_train_epochs=epochs,              # Number of epochs
         weight_decay=0.01,               # Weight decay
-        max_grad_norm=20,                # Maximum gradient norm
+        max_grad_norm=1,                # Maximum gradient norm
         save_strategy="steps",           # Save model checkpoints at the end of each epoch
         save_steps=eval_steps,                  # Save checkpoints every 500 stepss
         logging_dir="./logs",            # Directory for logs
@@ -336,7 +392,7 @@ def train():
 
     # Evaluate IR metrics.
     evaluator = Evaluator(
-        ds="legal",
+        ds="legal-inpars",
         model_name="qwen",
         metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank'},
         rerank=False,

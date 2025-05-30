@@ -8,7 +8,6 @@ from collections import Counter
 import xgboost as xgb
 from scipy.sparse import hstack
 from sklearn.metrics import classification_report, ndcg_score
-from rank_bm25 import BM25Okapi
 
 # --- Path Configuration ---
 def configure_python_path():
@@ -26,101 +25,36 @@ from src.utils.retrieval_utils import get_legal_dataset, get_legal_queries
 from config.config import STORAGE_DIR
 
 
-
 def ndcg_at_k(preds, labels, group, k=10):
     """
     Mean NDCG@k for either binary or graded labels.
-
     Parameters
     ----------
-    preds  : array-like, shape (n_samples,)
-        Model scores.
-    labels : array-like, shape (n_samples,)
-        True integer relevance labels (0/1 or 0-3).
-    group  : list of int
-        Docs-per-query counts summing to n_samples.
-    k      : int
-        Rank cutoff.
-
-    Returns
-    -------
-    float
-        Mean NDCG@k over all queries.
+    preds  : 1-D array of model scores
+    labels : 1-D array of int labels (0/1 or 0-3)
+    group  : list[int]  – docs-per-query, sum == len(preds)
+    k      : int        – rank cut-off
     """
-    scores, labs = [], []
-    idx = 0
+    scores, labs, i = [], [], 0
     for g in group:
-        scores.append(preds[idx:idx+g].reshape(1, -1))
-        labs.append(labels[idx:idx+g].reshape(1, -1))
-        idx += g
-    return float(np.mean([ndcg_score(l, s, k=k) for s, l in zip(scores, labs)]))
-
-
-def mrr_at_k(preds, labels, group, k=10):
-    """
-    Mean Reciprocal Rank @ k.
-
-    Parameters
-    ----------
-    preds  : array-like, shape (n_samples,)
-    labels : array-like, shape (n_samples,)
-    group  : list of int
-    k      : int
-
-    Returns
-    -------
-    float
-        Mean reciprocal rank.
-    """
-    rr_list = []
-    idx = 0
-    for g in group:
-        rel = labels[idx:idx+g]
-        scores = preds[idx:idx+g]
-        order = np.argsort(-scores)[:k]
-        rr = 0.0
-        for rank, doc_i in enumerate(order, start=1):
-            if rel[doc_i] >= 2:
-                rr = 1.0 / rank
-                break
-        rr_list.append(rr)
-        idx += g
-    return float(np.mean(rr_list))
-
-
-def recall_at_k(preds, labels, group, k=100):
-    """
-    Mean Recall @ k (positives are label>=2 for graded).
-
-    Parameters
-    ----------
-    preds  : array-like, shape (n_samples,)
-    labels : array-like, shape (n_samples,)
-    group  : list of int
-    k      : int
-
-    Returns
-    -------
-    float
-        Mean recall @ k.
-    """
-    recalls = []
-    idx = 0
-    for g in group:
-        rel = (labels[idx:idx+g] >= 2).astype(int)
-        scores = preds[idx:idx+g]
-        topk = np.argsort(-scores)[:min(k, g)]
-        recalls.append(rel[topk].sum() / rel.sum() if rel.sum() > 0 else 0.0)
-        idx += g
-    return float(np.mean(recalls))
+        scores.append(preds[i:i+g].reshape(1, -1))
+        labs.append(labels[i:i+g].reshape(1, -1))
+        i += g
+    return float(np.fromiter(
+        (ndcg_score(l, s, k=k) for s, l in zip(scores, labs)),
+        dtype=float
+    ).mean())
 
 
 def to_binary(labels):
     """
-    Convert graded labels to binary: 1 if >=2 else 0; pass 0/1 unchanged.
+    For graded labels (0-3) returns 1 if label >= 2.
+    For binary (0/1) returns unchanged.
     """
     labels = np.asarray(labels)
-    return (labels >= 2).astype(int) if labels.max() > 1 else labels
+    if labels.max() > 1:
+        return (labels >= 2).astype(int)
+    return labels
 
 
 class XGBoostPairwiseTrainer:
@@ -128,54 +62,64 @@ class XGBoostPairwiseTrainer:
                  train_tsv: str,
                  dev_tsv: str,
                  test_tsv: str,
-                 queries_path: str,
+                 queries_path: str = None,
                  mode: str = 'classification'):
+        """
+        Trainer for XGBoost in two modes:
+        - 'classification'  : binary:logistic with early stopping on logloss
+        - 'ranking'         : rank:ndcg with query grouping
+
+        Parameters
+        ----------
+        train_tsv, dev_tsv, test_tsv : str
+            Paths to TSV splits with columns [qid, doc_id, label].
+        mode : {'classification', 'ranking'}
+        """
         assert mode in ('classification', 'ranking')
         self.mode = mode
 
-        # Load queries & docs
+        # 1) Load queries & documents
         base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus")
-        self.qids, self.queries = get_legal_queries(queries_path)
-        self.dids, self.docs = get_legal_dataset(
+        self.qids,  self.queries = get_legal_queries(queries_path)
+        self.dids,  self.docs    = get_legal_dataset(
             os.path.join(base_dir, "corpus.jsonl")
         )
 
-        # Build ID→index maps
-        self._qid2idx = {qid: i for i, qid in enumerate(self.qids)}
-        self._did2idx = {did: i for i, did in enumerate(self.dids)}
+        # 2) Build ID→index maps for slicing sparse matrices
+        self._qid2idx = {qid: idx for idx, qid in enumerate(self.qids)}
+        self._did2idx = {did: idx for idx, did in enumerate(self.dids)}
 
-        # Load splits
+        # 3) Load splits (shuffle only in classification mode)
         self.train_qids, self.train_dids, self.y_train = self._load_split(
-            train_tsv, shuffle=(mode=='classification')
+            train_tsv, shuffle=(mode == 'classification')
         )
-        self.dev_qids, self.dev_dids, self.y_dev = self._load_split(
-            dev_tsv, shuffle=False
+        self.dev_qids,   self.dev_dids,   self.y_dev   = self._load_split(
+            dev_tsv,   shuffle=False
         )
-        self.test_qids, self.test_dids, self.y_test = self._load_split(
-            test_tsv, shuffle=False
+        self.test_qids,  self.test_dids,  self.y_test  = self._load_split(
+            test_tsv,  shuffle=False
         )
 
-        # Classification weight
-        if mode == 'classification':
-            pos = np.sum(self.y_train)
-            neg = len(self.y_train) - pos
-            self.scale_pos_weight = neg/pos if pos>0 else 1.0
+        # 4) If classification, compute scale_pos_weight
+        if self.mode == 'classification':
+            n_pos = int(np.sum(self.y_train))
+            n_neg = len(self.y_train) - n_pos
+            self.scale_pos_weight = (n_neg / n_pos) if n_pos > 0 else 1.0
+            print(f"scale_pos_weight = {self.scale_pos_weight:.4f}")
 
-        # Groups for ranking
-        if mode == 'ranking':
+        # 5) If ranking, build group lists
+        if self.mode == 'ranking':
             self.group_train = self._make_group(self.train_qids)
-            self.group_dev = self._make_group(self.dev_qids)
-            self.group_test = self._make_group(self.test_qids)
+            self.group_dev   = self._make_group(self.dev_qids)
+            self.group_test  = self._make_group(self.test_qids)
 
-        # TF-IDF
+        # 6) Fit TF-IDF on all text
         self.vectorizer = TfidfVectorizer()
         self.vectorizer.fit(self.queries + self.docs)
+        n_features = len(self.vectorizer.get_feature_names_out())
+        print(f"TF-IDF features: {n_features} (queries + docs)")
 
-        # BM25 index
-        tokenized = [doc.split() for doc in self.docs]
-        self.bm25 = BM25Okapi(tokenized)
-
-        # Prepare feature matrices for train/dev/test
+        # 7) Prepare sparse feature matrices
         self._prepare_xgboost_data()
 
     def _load_split(self, path: str, shuffle: bool = True):
@@ -221,15 +165,15 @@ class XGBoostPairwiseTrainer:
         self.X_test  = make_split(self.test_qids,  self.test_dids)
 
     def train(self,
-              n_estimators=2000,
+              n_estimators=100,
               learning_rate=0.03,
-              max_depth=4,
+              max_depth=3,
               subsample=0.5,
-              colsample_bytree=0.3,
-              gamma=5,
-              reg_alpha=1,
-              reg_lambda=10,
-              early_stopping_rounds=50,
+              colsample_bytree=0.5,
+              gamma=3,
+              reg_alpha=0,
+              reg_lambda=0,
+              early_stopping_rounds=20,
               use_gpu=True):
         """
         Train either XGBClassifier (classification) or XGBRanker (ranking).
@@ -302,61 +246,6 @@ class XGBoostPairwiseTrainer:
         self.model = model
         print("Training complete.\n")
 
-    def _retrieve(self, query: str, top_n: int = 100):
-        """
-        Return top_n doc indices for a query via BM25.
-        """
-        tokens = query.split()
-        scores = self.bm25.get_scores(tokens)
-        return np.argsort(scores)[::-1][:top_n].tolist()
-
-    def load_external_bm25(self,
-                           query_tsv: str,
-                           qrel_tsv: str,
-                           top_n: int = 100):
-        """
-        Build features & labels for external set by retrieving
-        top_n BM25 docs per query.
-
-        Returns
-        -------
-        X_ext : csr_matrix
-        y_ext : np.ndarray
-        group : list[int]
-        """
-        # Queries
-        qids, texts = get_legal_queries(query_tsv)
-
-        # Qrels
-        qr = pd.read_csv(qrel_tsv,
-                         sep='\t',
-                         names=['qid','run','doc_id','label'],
-                         dtype=str)
-        qr = qr.drop(columns=['run']).astype({'label':int})
-        dmap = qr.groupby('qid').apply(
-            lambda df: dict(zip(df['doc_id'], df['label']))
-        ).to_dict()
-
-        # Prepare index lists
-        ext_qidx, ext_didx, ext_lbl, group = [], [], [], []
-        for qi, qid in enumerate(qids):
-            idxs = self._retrieve(texts[qi], top_n)
-            group.append(len(idxs))
-            for didx in idxs:
-                ext_qidx.append(qi)
-                ext_didx.append(didx)
-                rel = dmap.get(qid, {}).get(self.dids[didx], 0)
-                ext_lbl.append(rel)
-
-        # Feature matrices
-        Q_mat = self.vectorizer.transform(texts)
-        D_mat = self.vectorizer.transform(self.docs)
-        Xq = Q_mat[ext_qidx]
-        Xd = D_mat[ext_didx]
-        X_ext = hstack([Xq, Xd], format='csr')
-        y_ext = np.array(ext_lbl, dtype=np.int32)
-        return X_ext, y_ext, group
-    
     def evaluate(self):
         """Print classification report on dev and test."""
         if not hasattr(self, 'model'):
@@ -377,57 +266,89 @@ class XGBoostPairwiseTrainer:
                 print(classification_report(y, bin_preds, digits=4, zero_division=0))
         else:
             raise ValueError("Invalid mode. Use 'classification' or 'ranking'.")
-        print("Evaluation complete.\n")  
+        print("Evaluation complete.\n")        
 
-    def evaluate_all(self, ext_query_tsv, ext_qrel_tsv, k=10, top_n=100):
+    def load_external_split(self, query_tsv, qrel_tsv):
+        if query_tsv.endswith('.csv'):
+            q_df = pd.read_csv(query_tsv, sep=',', header=0, names=['qid', 'query'], dtype=str)
+        else:
+            q_df = pd.read_csv(query_tsv, sep='\t', names=['qid', 'query'], dtype=str)
+        qid_to_row = {q: i for i, q in enumerate(q_df['qid'])}
+        Q_mat = self.vectorizer.transform(q_df['query'])
+
+        r_df = pd.read_csv(qrel_tsv, sep='\t',
+                        names=['qid', 'run', 'doc_id', 'label'], dtype=str)
+        # drop run column
+        r_df = r_df.drop(columns=['run'])
+        r_df['label'] = r_df['label'].astype(int)
+        r_df['qrow']  = r_df['qid'].map(qid_to_row)
+        r_df['drow']  = r_df['doc_id'].map(self._did2idx)
+
+        Xq = Q_mat[r_df['qrow']]
+        Xd = self.vectorizer.transform([self.docs[i] for i in r_df['drow']])
+        X_ext   = hstack([Xq, Xd], format='csr')
+        y_ext   = r_df['label'].to_numpy(np.int32)
+        group_e = r_df.groupby('qid').size().tolist()
+        return X_ext, y_ext, group_e
+
+    def evaluate_all(self,
+                 ext_query_tsv=None,
+                 ext_qrel_tsv=None,
+                 k=10):
+        """
+        Evaluate on dev, test, and (optionally) an external graded set.
+        """
         if not hasattr(self, 'model'):
             raise RuntimeError("Train first!")
 
-        def rerank(qrel_map, queries, split_name):
-            ndcgs, mrrs, recs = [], [], []
+        def one_split(X, y, group, name):
+            scores = self.model.predict(X)
+            ndcg = ndcg_at_k(scores, y, group, k)
+            bin_y = to_binary(y)
+            bin_pred = (scores >= 0.5).astype(int)
+            print(f"\n=== {name}  (NDCG@{k}: {ndcg:.4f}) ===")
+            print(classification_report(bin_y, bin_pred, digits=4, zero_division=0))
 
-            for qid, qtext in zip(self.qids, self.queries):
-                # 2) BM25 top-N
-                docs100 = self._retrieve(qtext, top_n)
+        # dev + test (their groups are already built)
+        one_split(self.X_dev,  self.y_dev,  self.group_dev,  "DEV")
+        one_split(self.X_test, self.y_test, self.group_test, "TEST")
 
-                # 3) build the features
-                Q_vec = self.vectorizer.transform([qtext])
-                D_sub = self.vectorizer.transform([ self.docs[i] for i in docs100 ])
-                X    = hstack([Q_vec.repeat(len(docs100), axis=0), D_sub])
-                
-                # 4) collect labels via the map
-                labels = np.array([
-                    qrel_map.get(qid,{}).get(self.dids[i], 0)
-                    for i in docs100
-                ], dtype=int)
+        # external set if given
+        if ext_query_tsv and ext_qrel_tsv:
+            X_ext, y_ext, g_ext = self.load_external_split(
+                ext_query_tsv, ext_qrel_tsv
+            )
+            one_split(X_ext, y_ext, g_ext, "EXTERNAL")
 
-                # 5) predict & eval
-                scores = self.model.predict(X)
-                ndcgs.append(ndcg_score(labels.reshape(1,-1),
-                                        scores.reshape(1,-1), k=k))
-                mrrs.append(mrr_at_k(scores, labels, [len(scores)], 10))
-                recs.append(recall_at_k(scores, labels, [len(scores)], 100))
+    def evaluate_external(self,
+                      query_tsv: str,
+                      qrel_tsv: str):
+        """
+        Evaluate on a completely new set of queries/qrels.
+        """
+        X_ext, y_ext, group_ext = self.load_external_split(query_tsv, qrel_tsv)
 
-            print(f"\n=== {split_name} (nDCG@{k}: {np.mean(ndcgs):.4f}) ===")
-            print(f"    MRR@10:    {np.mean(mrrs):.4f}")
-            print(f"    Recall@100:{np.mean(recs):.4f}")
+        # ---- predictions ----
+        preds = self.model.predict(X_ext)
 
-        # Re-rank & evaluate Dev
-        rerank(self.dev_qrel, self.queries,  "DEV")
-
-        # Re-rank & evaluate Test
-        rerank(self.test_qrel, self.queries, "TEST")
-
-        # Finally external — load its qrel map similarly, then:
-        # build ext_qrel same as above (qid→{doc→label})
-        ext_df = pd.read_csv(ext_qrel_tsv, sep='\t',
-                            names=['qid','run','doc_id','label'], dtype=str)
-        ext_df['label'] = ext_df['label'].astype(int)
-        ext_qrel = ext_df.groupby('qid').apply(
-            lambda df: dict(zip(df['doc_id'], df['label']))
-        ).to_dict()
-        rerank(ext_qrel, self.queries, "EXTERNAL")
-
+        # ---- metrics ----
+        if self.mode == 'classification':
+            bin_pred = (preds >= 0.5).astype(int)
+            print(classification_report(y_ext, bin_pred, digits=4, zero_division=0))
+        else:
+            # ranking – compute NDCG@10 per query
+            # break into query blocks
+            scores, labels = [], []
+            idx = 0
+            for g in group_ext:
+                scores.append(preds[idx: idx + g])
+                labels.append(y_ext[idx: idx + g])
+                idx += g
+            ndcgs = [
+                ndcg_score(l.reshape(1, -1), s.reshape(1, -1), k=10)
+                for s, l in zip(scores, labels)
+            ]
+            print(f"Mean NDCG@10 on external set: {np.mean(ndcgs):.4f}")
 
     def run(self, **train_kwargs):
         """Wrapper: train then evaluate and save."""
@@ -460,9 +381,14 @@ if __name__ == "__main__":
     )
     rank_trainer.run()
 
+    # rank_trainer.evaluate_external(
+    #     query_tsv=os.path.join(base, "corpus", "queries_57.csv"),
+    #     qrel_tsv =os.path.join(base, "annotations", "qrels_py.tsv")
+    # )
+
     rank_trainer.evaluate_all(
         ext_query_tsv=os.path.join(base, "corpus", "queries_54.tsv"),
         ext_qrel_tsv =os.path.join(base, "annotations", "qrels_54.tsv"),
-        k=10,
-        top_n=1000
+        k=10
     )
+

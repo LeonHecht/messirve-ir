@@ -69,7 +69,9 @@ class CrossEncoderScorer:
         self.tokenizer = tokenizer
         self.head_type = head_type
         # put model in eval mode
-        self.model.eval()
+        # check if model has attribute 'eval'
+        if hasattr(self.model, 'eval'):
+            self.model.eval()
 
     def score(self, query, doc, max_length=512):
         """

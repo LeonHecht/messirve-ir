@@ -74,6 +74,13 @@ def tokenize_train_ds_msmarco(tokenizer, train_ds, qid_to_query, pid_to_passage,
     return train_ds
 
 
+def tokenize_ds_legal(tokenizer, ds, num_negs):
+    print("Tokenizing train dataset...")
+    ds = ds.map(lambda x: tokenize_with_hard_negatives_legal(tokenizer, x, num_negs, MAX_QUERY_LEN, MAX_DOC_LEN), batched=True)
+    print("Done")
+    return ds
+
+
 def tokenize_test_ds_msmarco(tokenizer, test_ds, qid_to_query, pid_to_passage, num_negs, reuse=False):
     print("Tokenizing test dataset...")
     save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", f"test_ds_msmarco_{num_negs}negs_50k.pkl")
@@ -246,6 +253,60 @@ def tokenize_with_hard_negatives_msmarco(tokenizer, examples: dict, qid_to_query
     for i in range(num_negs):
         neg_pids = examples[f"negative_{i+1}"]
         flattened_negatives.extend([pid_to_passage[neg_pid] for neg_pid in neg_pids])
+    
+    # Tokenize queries
+    tokenized_queries = tokenize_with_manual_eos(tokenizer, queries, max_length=max_query_len)
+
+    # Tokenize positive documents
+    tokenized_docs = tokenize_with_manual_eos(tokenizer, positives, max_length=max_doc_len)
+
+    # Tokenize hard negatives (flattened)
+    tokenized_all_negatives = tokenize_with_manual_eos(tokenizer, flattened_negatives, max_length=max_doc_len)
+
+    # Rolling index to rebuild the structure
+    rolling_index = 0
+    neg_input_ids = []
+    neg_attention_masks = []
+    for i in range(len(examples["negative_1"])):
+        neg_input_ids.append(
+            tokenized_all_negatives["input_ids"][rolling_index : rolling_index + num_negs]
+        )
+        neg_attention_masks.append(
+            tokenized_all_negatives["attention_mask"][rolling_index : rolling_index + num_negs]
+        )
+        rolling_index += num_negs
+    
+    return {
+        "query_input_ids": tokenized_queries["input_ids"],
+        "query_attention_mask": tokenized_queries["attention_mask"],
+        "doc_input_ids": tokenized_docs["input_ids"],
+        "doc_attention_mask": tokenized_docs["attention_mask"],
+        "neg_input_ids": neg_input_ids,     # list of lists
+        "neg_attention_mask": neg_attention_masks,      # list of lists
+    }
+
+
+def tokenize_with_hard_negatives_legal(tokenizer, examples: dict, num_negs, max_query_len, max_doc_len):
+    """
+    Due to dataset.map(batched=True) parameter, examples is a dictionary where
+    each key corresponds to a column in your dataset and the value is a list
+    of items for that column.
+    Example:
+    {
+        "query": ["how to make pizza", "how to make pasta"],
+        "positive": ["To make pizza, you need...", "To make pasta, you need..."],
+        "negative_1": ["To make a cake, you need...", "To make a salad, you need..."],
+        "negative_2": ["To make a sandwich, you need...", "To make a burger, you need..."],
+        ...
+    }
+    """
+    queries = examples["query"]
+    positives = examples["positive"]
+
+    # Flatten the list of hard negatives for tokenization
+    flattened_negatives = []
+    for i in range(num_negs):
+        flattened_negatives.extend(examples[f"negative_{i+1}"])
     
     # Tokenize queries
     tokenized_queries = tokenize_with_manual_eos(tokenizer, queries, max_length=max_query_len)

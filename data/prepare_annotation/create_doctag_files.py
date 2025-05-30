@@ -33,15 +33,15 @@ from config.config import STORAGE_DIR
 from src.utils.retrieval_utils import get_legal_queries
 
 
-# def read_corpus_csv(path):
-#     # corpus/corpus_google_min_line_len2_naive.csv
-#     # get all texts from the corpus
-#     df = pd.read_csv(path, usecols=['Codigo', 'text'])
-#     # rename Codigo column to document_id
-#     df = df.rename(columns={'Codigo': 'document_id'})
-#     # convert document_id to string
-#     df['document_id'] = df['document_id'].astype(str)
-#     return df
+def read_corpus_csv(path):
+    # corpus/corpus_google_min_line_len2_naive.csv
+    # get all texts from the corpus
+    df = pd.read_csv(path, usecols=['Codigo', 'text'])
+    # rename Codigo column to document_id
+    df = df.rename(columns={'Codigo': 'document_id'})
+    # convert document_id to string
+    df['document_id'] = df['document_id'].astype(str)
+    return df
 
 
 def create_corpus_file(out_path):
@@ -66,7 +66,7 @@ def create_query_file(queries_path, out_path):
     # "corpus/docTAG/topics_57.json"
     topics = []
 
-    df = pd.read_csv(queries_path)
+    df = pd.read_csv(queries_path, sep="\t")
     
     for row in df.itertuples():
         topic_id, query = row[1], row[2]
@@ -149,8 +149,11 @@ def create_labels_file(out_path):
 
 def main():
     # create_corpus_file("docTAG/corpus_docTAG.json")
-    # create_query_file("queries_57.csv", "corpus/docTAG/topics_57.json")
-    create_runs_file(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "llm_annotation_runs.json"))
+    create_query_file(
+        os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_54.tsv"),
+        os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_54_docTAG.json"),
+    )
+    # create_runs_file(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "llm_annotation_runs.json"))
     # create_labels_file("corpus/docTAG/labels.json")
 
 if __name__ == "__main__":

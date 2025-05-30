@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from datasets import load_from_disk
 import random
 import json
@@ -29,22 +29,17 @@ from config.config import STORAGE_DIR
 def finetune():
     base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
     
-    train_ds_path = "bce_6x_synthetic_train_baai.jsonl"
-    dev_ds_path = "bce_6x_synthetic_dev_baai.jsonl"
-    test_ds_path = "bce_6x_synthetic_test_baai.jsonl"
-    
+    train_ds_path = "bce_6x_inpars_synthetic_baai.jsonl"
     train_ds_path = os.path.join(base_dir, "datasets", "dual_encoder", train_ds_path)
-    dev_ds_path = os.path.join(base_dir, "datasets", "dual_encoder", dev_ds_path)
-    test_ds_path = os.path.join(base_dir, "datasets", "dual_encoder", test_ds_path)
 
     output_dir = os.path.join(STORAGE_DIR, "legal_ir", "results", "baai_finetuning")
 
-    run_name = "bge-m3_synthetic_6x"
+    run_name = "bge-m3_full_6x"
 
     output_dir = os.path.join(output_dir, run_name)
 
     # run command in terminal
-    command = f"""torchrun --nproc_per_node 1 \
+    command = f"""nohup torchrun --standalone --nproc_per_node 1 \
 	-m FlagEmbedding.finetune.embedder.encoder_only.m3 \
 	--model_name_or_path BAAI/bge-m3 \
     --cache_dir ./cache/model \
@@ -52,7 +47,7 @@ def finetune():
     --cache_path ./cache/data \
     --train_group_size 7 \
     --query_max_len 48 \
-    --passage_max_len 1024 \
+    --passage_max_len 4096 \
     --pad_to_multiple_of 8 \
     --knowledge_distillation False \
     --same_dataset_within_batch True \
@@ -61,15 +56,15 @@ def finetune():
     --deepspeed /home/leon/tesis/messirve-ir/ds_stage0.json \
     --output_dir {output_dir} \
     --overwrite_output_dir \
-    --learning_rate 5e-6 \
-    --num_train_epochs 2 \
+    --learning_rate 2e-6 \
+    --num_train_epochs 1 \
     --per_device_train_batch_size 2 \
-    --gradient_accumulation_steps 4 \
+    --gradient_accumulation_steps 8 \
     --dataloader_drop_last True \
     --warmup_ratio 0.1 \
     --gradient_checkpointing \
     --logging_steps 10 \
-    --save_steps 100 \
+    --save_steps 200 \
     --negatives_cross_device \
     --temperature 0.02 \
     --sentence_pooling_method cls \
@@ -79,9 +74,12 @@ def finetune():
     --use_self_distill False \
     --fix_encoder False \
     --self_distill_start_step 0 \
-    --max_grad_norm 20 \
+    --max_grad_norm 0.5 \
     --bf16 \
+    --save_total_limit 2 \
+    > output4.log 2>&1 &
 """
+    # --resume_from_checkpoint {os.path.join(output_dir, "checkpoint-5400")} \
 
     # execute command in terminal
     os.system(command)
