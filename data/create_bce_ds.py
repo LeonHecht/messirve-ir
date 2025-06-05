@@ -320,6 +320,9 @@ def build_ce_dataset(
         qrels_path, sep="\t", header=None,
         names=["qid", "run", "doc_id", "label"]
     )
+    df_q["qid"] = df_q["qid"].astype(str)
+    df_q["doc_id"] = df_q["doc_id"].astype(str)
+
     positives = (
         df_q[df_q.label.isin(pos_labels)]
         .groupby("qid")["doc_id"]
@@ -345,7 +348,6 @@ def build_ce_dataset(
 
     # 3) Load queries
     qids, queries = get_legal_queries(queries_path)
-    qids = [int(q) for q in qids]
     query_dict = dict(zip(qids, queries))
 
     rows = []
@@ -448,7 +450,7 @@ def main_create_scenario_datasets():
     base = Path(STORAGE_DIR) / "legal_ir" / "data"
     # ann  = base / "annotations" / "qrels_py.tsv"
     ann  = base / "annotations" / "inpars_mistral-small-2501_qrels_Q1.tsv"
-    corp = base / "corpus" / "corpus.jsonl"
+    corp = base / "corpus" / "corpus_mistral_summaries_1024.jsonl"
     qry  = base / "corpus" / "inpars_mistral-small-2501_queries_Q1.tsv"
     out  = base / "datasets" / "cross_encoder"
     out.mkdir(parents=True, exist_ok=True)
@@ -517,15 +519,13 @@ def main_create_scenario_datasets():
         #     neg_ratio=6,
         #     seed=seed
         # )
-        build_ce_dataset_chunked(
+        build_ce_dataset(
             qrels_path=str(ann),
             pos_labels=[1],
             neg_labels=[0],
             corpus_path=str(corp),
             queries_path=str(qry),
-            output_path=str(out / f"bce_6x_inpars_chunked_{split_name}.tsv"),
-            max_length=512,
-            stride=256,
+            output_path=str(out / f"bce_6x_inpars_summary_1024_{split_name}.tsv"),
             qid_filter=qids,
             neg_ratio=6,
             seed=seed

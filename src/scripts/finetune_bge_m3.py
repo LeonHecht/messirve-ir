@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 from datasets import load_from_disk
 import random
 import json
@@ -29,12 +29,12 @@ from config.config import STORAGE_DIR
 def finetune():
     base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
     
-    train_ds_path = "bce_6x_inpars_synthetic_baai.jsonl"
+    train_ds_path = "bce_6x_inpars_synthetic_chunked_baai.jsonl"
     train_ds_path = os.path.join(base_dir, "datasets", "dual_encoder", train_ds_path)
 
     output_dir = os.path.join(STORAGE_DIR, "legal_ir", "results", "baai_finetuning")
 
-    run_name = "bge-m3_full_6x"
+    run_name = "bge-m3_full_6x_chunked_self_distill_unified"
 
     output_dir = os.path.join(output_dir, run_name)
 
@@ -47,7 +47,7 @@ def finetune():
     --cache_path ./cache/data \
     --train_group_size 7 \
     --query_max_len 48 \
-    --passage_max_len 4096 \
+    --passage_max_len 512 \
     --pad_to_multiple_of 8 \
     --knowledge_distillation False \
     --same_dataset_within_batch True \
@@ -56,7 +56,7 @@ def finetune():
     --deepspeed /home/leon/tesis/messirve-ir/ds_stage0.json \
     --output_dir {output_dir} \
     --overwrite_output_dir \
-    --learning_rate 2e-6 \
+    --learning_rate 5e-6 \
     --num_train_epochs 1 \
     --per_device_train_batch_size 2 \
     --gradient_accumulation_steps 8 \
@@ -70,14 +70,14 @@ def finetune():
     --sentence_pooling_method cls \
     --normalize_embeddings True \
     --kd_loss_type m3_kd_loss \
-    --unified_finetuning False \
-    --use_self_distill False \
+    --unified_finetuning True \
+    --use_self_distill True \
     --fix_encoder False \
     --self_distill_start_step 0 \
     --max_grad_norm 0.5 \
     --bf16 \
     --save_total_limit 2 \
-    > output4.log 2>&1 &
+    > m3_full_6x_chunked_self_distill_unified.log 2>&1 &
 """
     # --resume_from_checkpoint {os.path.join(output_dir, "checkpoint-5400")} \
 

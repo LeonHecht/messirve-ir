@@ -74,9 +74,9 @@ def tokenize_train_ds_msmarco(tokenizer, train_ds, qid_to_query, pid_to_passage,
     return train_ds
 
 
-def tokenize_ds_legal(tokenizer, ds, num_negs):
+def tokenize_ds_legal(tokenizer, ds, num_negs, max_doc_len, max_query_len):
     print("Tokenizing train dataset...")
-    ds = ds.map(lambda x: tokenize_with_hard_negatives_legal(tokenizer, x, num_negs, MAX_QUERY_LEN, MAX_DOC_LEN), batched=True)
+    ds = ds.map(lambda x: tokenize_with_hard_negatives_legal(tokenizer, x, num_negs, max_query_len, max_doc_len), batched=True)
     print("Done")
     return ds
 

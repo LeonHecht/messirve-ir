@@ -1,9 +1,11 @@
 import os
+from typing import Any, Callable, Dict, List, Tuple
 import numpy as np
 from tqdm import tqdm
 import torch
 import pytrec_eval
 from .train_utils import tokenize_with_manual_eos, get_eos_embeddings
+from torch.utils.data import DataLoader, TensorDataset
 from config.config import MAX_QUERY_LEN, MAX_DOC_LEN
 import torch.nn.functional as F
 try:
@@ -420,6 +422,60 @@ def embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run):
     return run
 
 
+ChunkEmbedFn = Callable[
+    [Any, Any, Dict[str, str], int, int],
+    Tuple[List[str], torch.Tensor]
+]
+
+
+def evaluate_with_chunking(
+    model: Any,
+    tokenizer: Any,
+    query_dict: Dict[str, str],
+    doc_dict: Dict[str, str],
+    chunk_embed_fn: ChunkEmbedFn,
+    query_embed_fn: Callable[[Any, Any, List[str]], torch.Tensor],
+    chunk_size: int,
+    stride: int,
+    pooling: str = "top_3",
+):
+    # 1. Embed (chunk_ids, chunk_embeddings)
+    chunk_ids, chunk_embs = chunk_embed_fn(model, tokenizer, doc_dict, chunk_size, stride)
+
+    # 2. Embed all queries
+    query_ids   = list(query_dict.keys())
+    query_texts = list(query_dict.values())
+    q_embs = query_embed_fn(model, tokenizer, query_texts)  # shape (Q, D)
+
+    # 3. Compute raw similarities: Q×C
+    raw_sim = q_embs @ chunk_embs.T  # (Q, C)
+
+    # 4. Pool to doc-level
+    all_doc_ids = list(doc_dict.keys())
+    doc_to_chunk_idxs = {}
+    for idx, ch_id in enumerate(chunk_ids):
+        doc_id = ch_id.split("__")[0]
+        doc_to_chunk_idxs.setdefault(doc_id, []).append(idx)
+    sim_scores = torch.full((len(query_ids), len(all_doc_ids)), -np.inf)
+    for j, did in enumerate(all_doc_ids):
+        idxs = doc_to_chunk_idxs.get(did, [])
+        if idxs:
+            if pooling == "max":
+                sim_scores[:, j], _ = raw_sim[:, idxs].max(dim=1)
+            else:  # "top_3"
+                k = min(3, len(idxs))
+                vals, _ = raw_sim[:, idxs].topk(k, dim=1)
+                sim_scores[:, j] = vals.mean(dim=1)
+
+    # 5. Build run dict
+    run: Dict[str, Dict[str, float]] = {}
+    for qi, qid in enumerate(query_ids):
+        # sim_scores[qi, :] is a 1×D tensor
+        doc_scores = {did: sim_scores[qi, d].item() for d, did in enumerate(all_doc_ids)}
+        run[qid] = dict(sorted(doc_scores.items(), key=lambda x: x[1], reverse=True))
+    return run
+
+
 from transformers import AutoTokenizer
 def embed_bge_sliding_window(model, doc_dict, query_dict, reuse_run):
     """
@@ -700,6 +756,191 @@ def embed_bge_sparse(model, docs, queries, doc_ids, query_ids, reuse_run):
     }
     return runs
 
+
+def embed_bge_sparse_sliding_window(model, doc_dict, query_dict, reuse_run):
+    """
+    Embed queries and chunked documents con BGE-M3 (dense, sparse y ColBERT),
+    aplica ventana deslizante a los documentos y agrupa las similitudes por documento.
+
+    Parameters
+    ----------
+    model : BGEM3FlagModel
+        Instancia del modelo BGE-M3.
+    doc_dict : dict of {hashable: str}
+        Mapping de doc_id a texto completo del documento.
+    query_dict : dict of {hashable: str}
+        Mapping de query_id a texto de la consulta.
+    reuse_run : bool
+        Indicador para reusar coridas previas (no utilizado aquí).
+
+    Returns
+    -------
+    dict of str -> dict
+        Diccionario que mapea nombre de run a los resultados de recuperación:
+        run_name -> { query_id: [(score, doc_text, doc_id), ...], ... }.
+    """
+    # Parámetros de la ventana deslizante
+    chunk_size = 512
+    stride = 128
+
+    # Listas ordenadas de IDs y textos
+    doc_ids = list(doc_dict.keys())
+    query_ids = list(query_dict.keys())
+    query_texts = list(query_dict.values())
+
+    # Instancio un tokenizer rápido para BGE-M3
+    tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-m3", use_fast=True)
+
+    # 1) Construir lista plana de (doc_id, texto_chunk)
+    chunk_map = []
+    for doc_id in tqdm(doc_ids, desc="Chunking docs"):
+        text = doc_dict[doc_id]
+        toks = tokenizer.encode(text, add_special_tokens=False)
+        for start in range(0, len(toks), stride):
+            window = toks[start:start + chunk_size]
+            if not window:
+                break
+            chunk_text = tokenizer.decode(window, skip_special_tokens=True)
+            chunk_map.append((doc_id, chunk_text))
+
+    # Desempaquetar listas de IDs de chunk y textos de chunk
+    chunk_doc_ids = [did for did, _ in chunk_map]
+    chunk_texts = [ct for _, ct in chunk_map]
+
+    # 2) Codificar queries (dense, sparse y ColBERT)
+    print("Embedding queries...", end="")
+    q_out = model.encode(
+        query_texts,
+        batch_size=8,
+        max_length=MAX_QUERY_LEN,
+        return_dense=True,
+        return_sparse=True,
+        return_colbert_vecs=True,
+    )
+    print("Done.")
+
+    # 3) Codificar chunks (dense, sparse y ColBERT)
+    print("Embedding chunks...", end="")
+    c_out = model.encode(
+        chunk_texts,
+        batch_size=2,
+        max_length=chunk_size,
+        return_dense=True,
+        return_sparse=True,
+        return_colbert_vecs=True,
+    )
+    print("Done.")
+
+    # Convertir vetores a tensores
+    q_dense = torch.tensor(q_out["dense_vecs"], dtype=torch.float32)
+    c_dense = torch.tensor(c_out["dense_vecs"], dtype=torch.float32)
+
+    # 4) Calcular similitudes crudas (Q x C) para cada tipo
+    # Dense
+    dense_raw = q_dense @ c_dense.T
+
+    # Sparse
+    sparse_raw = compute_sparse_similarity(
+        model,
+        q_out["lexical_weights"],
+        c_out["lexical_weights"],
+    )
+
+    # ColBERT
+    colbert_raw = compute_colbert_similarity(
+        q_out["colbert_vecs"],
+        c_out["colbert_vecs"],
+        model,
+    )
+
+    # 5) Pooling por documento usando max o top-k
+    Q = dense_raw.size(0)
+    D = len(doc_dict)
+    device = dense_raw.device
+
+    # Inicializo matrices de similitud documento-nivel
+    dense_sim = torch.full((Q, D), -np.inf, device=device)
+    sparse_sim = torch.full((Q, D), -np.inf, device=device)
+    colbert_sim = torch.full((Q, D), -np.inf, device=device)
+
+    # Mapear cada doc_id a los índices de chunk correspondientes
+    pools = {}
+    for idx, did in enumerate(chunk_doc_ids):
+        pools.setdefault(did, []).append(idx)
+
+    pooling_strategy = "top_3"
+    top_k = 3
+
+    for j, did in enumerate(tqdm(doc_ids, desc="Pooling chunks")):
+        idxs = pools.get(did, [])
+        if not idxs:
+            continue
+
+        idx_tensor = torch.tensor(idxs, dtype=torch.long, device=device)
+
+        # Dense pooling
+        if pooling_strategy == "max":
+            dense_sim[:, j], _ = dense_raw[:, idx_tensor].max(dim=1)
+        else:  # "top_3"
+            k = min(top_k, len(idxs))
+            if k < top_k:
+                print(f"Warning: fewer than {top_k} chunks for doc {did}.")
+            vals, _ = dense_raw[:, idx_tensor].topk(k, dim=1)
+            dense_sim[:, j] = vals.mean(dim=1)
+
+        # Sparse pooling
+        if pooling_strategy == "max":
+            sparse_sim[:, j], _ = sparse_raw[:, idx_tensor].max(dim=1)
+        else:
+            k = min(top_k, len(idxs))
+            vals, _ = sparse_raw[:, idx_tensor].topk(k, dim=1)
+            sparse_sim[:, j] = vals.mean(dim=1)
+
+        # ColBERT pooling
+        if pooling_strategy == "max":
+            colbert_sim[:, j], _ = colbert_raw[:, idx_tensor].max(dim=1)
+        else:
+            k = min(top_k, len(idxs))
+            vals, _ = colbert_raw[:, idx_tensor].topk(k, dim=1)
+            colbert_sim[:, j] = vals.mean(dim=1)
+
+    # 6) Normalizar por consulta (z-score, min-max o RRF)
+    NORM = "z"
+    if NORM == "z":
+        dense_n = per_query_zscore(dense_sim)
+        sparse_n = per_query_zscore(sparse_sim)
+        colbert_n = per_query_zscore(colbert_sim)
+    elif NORM == "minmax":
+        dense_n = per_query_minmax(dense_sim)
+        sparse_n = per_query_minmax(sparse_sim)
+        colbert_n = per_query_minmax(colbert_sim)
+    elif NORM == "rrf":
+        dense_n = rrf(dense_sim)
+        sparse_n = rrf(sparse_sim)
+        colbert_n = rrf(colbert_sim)
+    else:
+        dense_n, sparse_n, colbert_n = dense_sim, sparse_sim, colbert_sim
+
+    # 7) Fusionar matrices normalizadas
+    dense_sparse_sim = 0.5 * dense_n + 0.5 * sparse_n
+    dense_colbert_sim = 0.5 * dense_n + 0.5 * colbert_n
+    sparse_colbert_sim = 0.5 * sparse_n + 0.5 * colbert_n
+    all_three_sim = (dense_n + sparse_n + colbert_n) / 3.0
+
+    # 8) Recuperar listas de resultados con la función `retrieve`
+    runs = {
+        "dense": retrieve(query_ids, doc_ids, dense_sim.cpu()),
+        "sparse": retrieve(query_ids, doc_ids, sparse_sim.cpu()),
+        "colbert": retrieve(query_ids, doc_ids, colbert_sim.cpu()),
+        "dense_sparse": retrieve(query_ids, doc_ids, dense_sparse_sim.cpu()),
+        "dense_colbert": retrieve(query_ids, doc_ids, dense_colbert_sim.cpu()),
+        "sparse_colbert": retrieve(query_ids, doc_ids, sparse_colbert_sim.cpu()),
+        "all_three": retrieve(query_ids, doc_ids, all_three_sim.cpu()),
+    }
+
+    return runs
+
+
 def get_sim_bge(model, docs, queries):
     embeddings_queries = model.encode(queries, batch_size=8, max_length=MAX_QUERY_LEN)['dense_vecs']
     print("Embedding docs...", end="")
@@ -725,7 +966,6 @@ def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
     Returns:
         dict: Dictionary with query as key and a list of tuples of (similarity, document text, doc_id) as value.
     """
-    from torch.utils.data import DataLoader, TensorDataset
     batch_size = 8
     device = next(model.parameters()).device  # Automatically detect model's device
     print("Device: ", device)
@@ -765,6 +1005,160 @@ def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
 
     similarity = compute_similarity(embeddings_queries, embeddings_docs)
     run = retrieve(query_ids, doc_ids, similarity)
+    return run
+
+
+def embed_qwen_chunked(
+    model: Any,
+    tokenizer: Any,
+    docs: Dict[str, str],
+    queries: Dict[str, str],
+    doc_ids: List[str],
+    query_ids: List[str],
+    chunk_size: int = 512,
+    stride: int = 256,
+    batch_size: int = 8,
+) -> Dict[str, Dict[str, float]]:
+    """
+    Embed queries and chunked documents using Qwen, pool chunk similarities to
+    document level, and return a retrieval run.
+
+    Documents are split into overlapping token windows (chunks). Each chunk's
+    embedding is obtained by passing through Qwen and extracting the embedding
+    at the end-of-sequence (EOS) token. Query embeddings are computed once per
+    query. Chunk-level similarities are computed, then aggregated (mean of top-3
+    chunk scores) for each document to produce document-level scores.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Qwen embedding model.
+    tokenizer : transformers.PreTrainedTokenizerBase
+        Tokenizer for the Qwen model.
+    docs : dict
+        Mapping from document ID (str) to document text (str).
+    queries : dict
+        Mapping from query ID (str) to query text (str).
+    doc_ids : list of str
+        List of document IDs, in the same order as `docs.keys()`.
+    query_ids : list of str
+        List of query IDs, in the same order as `queries.keys()`.
+    chunk_size : int, optional
+        Maximum token length per chunk (default is 512).
+    stride : int, optional
+        Stride for sliding window in tokens (default is 256).
+    batch_size : int, optional
+        Batch size for embedding chunks and queries (default is 8).
+
+    Returns
+    -------
+    run : dict
+        Mapping from query_id (str) to a dictionary {doc_id (str): score (float)},
+        sorted in descending order of score.
+    """
+    device = next(model.parameters()).device
+
+    # 1) Build chunk texts and maintain mapping from chunk index to doc_id
+    chunk_texts: List[str] = []
+    chunk_doc_ids: List[str] = []
+    for doc_id in tqdm(doc_ids, desc="Building chunks"):
+        text = docs[doc_id]
+        tokens = tokenizer.encode(text, add_special_tokens=False)
+        for start in range(0, len(tokens), stride):
+            window = tokens[start : start + chunk_size]
+            if not window:
+                break
+            chunk_text = tokenizer.decode(window, skip_special_tokens=True)
+            chunk_texts.append(chunk_text)
+            chunk_doc_ids.append(doc_id)
+
+    # 2) Embed queries (full-text) using existing tokenization + EOS logic
+    query_texts = [queries[qid] for qid in query_ids]
+    inputs_queries = tokenize_with_manual_eos(
+        tokenizer, query_texts, max_length=MAX_QUERY_LEN
+    )
+    query_input_ids = torch.tensor(inputs_queries["input_ids"], dtype=torch.long)
+    query_attention_mask = torch.tensor(
+        inputs_queries["attention_mask"], dtype=torch.long
+    )
+    query_dataset = TensorDataset(query_input_ids, query_attention_mask)
+    query_loader = DataLoader(query_dataset, batch_size=batch_size, pin_memory=True)
+
+    embeddings_queries_list = []
+    model.eval()
+    with torch.no_grad():
+        for input_ids, attention_mask in tqdm(
+            query_loader, desc="Embedding queries"
+        ):
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
+            q_embeds = get_eos_embeddings(
+                model, input_ids, attention_mask, tokenizer
+            )
+            embeddings_queries_list.append(q_embeds)
+    embeddings_queries = torch.cat(embeddings_queries_list, dim=0)  # (Q, D)
+
+    # 3) Embed chunks in batches
+    chunk_embeddings_list = []
+    if chunk_texts:
+        # Tokenize all chunks with max_length=chunk_size
+        inputs_chunks = tokenize_with_manual_eos(
+            tokenizer, chunk_texts, max_length=chunk_size
+        )
+        chunk_input_ids = torch.tensor(inputs_chunks["input_ids"], dtype=torch.long)
+        chunk_attention_mask = torch.tensor(
+            inputs_chunks["attention_mask"], dtype=torch.long
+        )
+        chunk_dataset = TensorDataset(chunk_input_ids, chunk_attention_mask)
+        chunk_loader = DataLoader(chunk_dataset, batch_size=batch_size, pin_memory=True)
+
+        with torch.no_grad():
+            for input_ids, attention_mask in tqdm(
+                chunk_loader, desc="Embedding chunks"
+            ):
+                input_ids = input_ids.to(device)
+                attention_mask = attention_mask.to(device)
+                c_embeds = get_eos_embeddings(
+                    model, input_ids, attention_mask, tokenizer
+                )
+                chunk_embeddings_list.append(c_embeds)
+        chunk_embeddings = torch.cat(chunk_embeddings_list, dim=0)  # (C, D)
+    else:
+        # No chunks: return empty similarity
+        chunk_embeddings = torch.empty((0, embeddings_queries.size(1)), device=device)
+
+    # 4) Compute raw similarity: (Q, C)
+    similarity_raw = compute_similarity(embeddings_queries, chunk_embeddings)
+
+    # 5) Pool chunk-level scores to document-level (mean of top 3)
+    num_queries = similarity_raw.size(0)
+    unique_doc_ids = doc_ids
+    num_docs = len(unique_doc_ids)
+    sim_scores = torch.full((num_queries, num_docs), -np.inf, device=device)
+
+    # Map doc_id to list of chunk indices
+    doc_to_chunks: Dict[str, List[int]] = {}
+    for idx, d_id in enumerate(chunk_doc_ids):
+        doc_to_chunks.setdefault(d_id, []).append(idx)
+
+    for doc_idx, d_id in enumerate(unique_doc_ids):
+        chunk_idxs = doc_to_chunks.get(d_id, [])
+        if not chunk_idxs:
+            continue
+        k = min(3, len(chunk_idxs))
+        topk_vals, _ = similarity_raw[:, chunk_idxs].topk(k, dim=1)
+        sim_scores[:, doc_idx] = topk_vals.mean(dim=1)
+
+    # 6) Build run dictionary
+    run: Dict[str, Dict[str, float]] = {}
+    for q_idx, q_id in enumerate(query_ids):
+        scores = sim_scores[q_idx].tolist()
+        doc_score_map = dict(zip(unique_doc_ids, scores))
+        sorted_docs = dict(
+            sorted(doc_score_map.items(), key=lambda x: x[1], reverse=True)
+        )
+        run[q_id] = sorted_docs
+
     return run
 
 
@@ -1761,7 +2155,11 @@ def get_legal_dataset(path):
         raise ValueError("Path must end with .json or .jsonl")
     # convert Codigo column datatype to str
     df["id"] = df["id"].astype(str)
-    return df["id"].tolist(), df["text"].tolist()
+
+    doc_ids = df["id"].tolist()
+    docs = df["text"].tolist()
+
+    return doc_ids, docs
 
 
 
@@ -1806,6 +2204,34 @@ def normalize_token(tok: str) -> str:
     return re.sub(r'[^a-zA-Z]', '', tok)
 
 
+def tokenize_simple(text):
+    """
+    Tokeniza un texto en palabras sencillas, eliminando puntuación básica
+    y pasando a minúsculas.
+
+    Parameters
+    ----------
+    text : str
+        Texto a tokenizar.
+
+    Returns
+    -------
+    set[str]
+        Conjunto de tokens únicos.
+    """
+    return (
+        text.lower()
+        .replace("¿", " ")
+        .replace("?", " ")
+        .replace("¡", " ")
+        .replace("!", " ")
+        .replace(",", " ")
+        .replace(".", " ")
+        .replace(":", " ")
+        .replace(";", " ")
+    )
+
+
 def get_legal_dataset_norm(path: str, normalize: bool = False) -> tuple[list[str], list[str]]:
     """
     Load a legal dataset from a JSON or JSONL file and optionally lemmatize and normalize the text.
@@ -1842,7 +2268,7 @@ def get_legal_dataset_norm(path: str, normalize: bool = False) -> tuple[list[str
     if normalize:
         print("Normalizing text...")
         df["text"] = df["text"].progress_apply(
-            lambda x: " ".join(normalize_token(tok) for tok in x.split())
+            lambda x: tokenize_simple(x)
             if isinstance(x, str) else x
         )
 
@@ -1856,3 +2282,74 @@ def get_legal_queries(path):
     # convert topic_id column to list
     df["id"] = df["id"].astype(str)
     return df["id"].tolist(), df["query"].tolist()
+
+
+def embed_colbert(model, docs, queries, doc_ids, query_ids):
+    """
+    Embed documents and queries using el modelo ColBERT (a través de RAGatouille) y
+    computar la similitud entre queries y docs realizando una búsqueda late-interaction.
+
+    Parameters
+    ----------
+    model : any
+        No se utiliza directamente; se instancia internamente RAGPretrainedModel.
+    docs : list of str
+        Lista de textos de documentos a indexar.
+    queries : list of str
+        Lista de textos de consultas.
+    doc_ids : list of str
+        Lista de IDs de documentos correspondiente a `docs`.
+    query_ids : list of str
+        Lista de IDs de consultas correspondiente a `queries`.
+
+    Returns
+    -------
+    run : dict
+        Diccionario donde cada clave es un query_id (str) y su valor es otro diccionario
+        que mapea cada doc_id (str) a la similitud (float) con esa query.
+    """
+    from ragatouille import RAGPretrainedModel
+
+    if model:
+        RAG = model
+    else:
+        # Crea/recupera instancia de ColBERT vía RAGatouille
+        RAG = RAGPretrainedModel.from_pretrained("jinaai/jina-colbert-v2")
+
+    # Indexa los documentos
+    # Es importante pasar document_ids para que RAG.search devuelva 'document_id' en los resultados
+    RAG.index(
+        collection=docs,
+        document_ids=doc_ids,
+        index_name="demo_colbert",
+        overwrite_index=True,  # Sobrescribe el índice si ya existe
+        max_document_length=4096,
+        split_documents=False,  # Divide documentos largos en fragmentos
+    )
+
+    # Número de resultados por query: para obtener todos, usamos len(doc_ids)
+    k = len(doc_ids)
+
+    # Ejecuta la búsqueda para todas las queries de una sola vez
+    results = RAG.search(
+        query=queries,
+        index_name="demo_colbert",
+        k=k
+    )
+
+    run = {}
+    # Si solo hay una query, results será lista de dicts; si varias, lista de listas de dicts
+    if isinstance(results, dict):
+        # Caso atípico: RAG.search devuelve un dict (no debería ocurrir con múltiples queries)
+        hits_for_query = [results]
+    else:
+        hits_for_query = results
+
+    for idx, qid in enumerate(query_ids):
+        hits = hits_for_query[idx]
+        # Cada hit es dict con keys 'content', 'score', 'rank', 'document_id'
+        run[str(qid)] = {
+            str(hit["document_id"]): float(hit["score"]) for hit in hits
+        }
+
+    return run

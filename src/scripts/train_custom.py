@@ -14,6 +14,7 @@ import json
 import pandas as pd
 import uuid
 import sys
+
 def configure_python_path():
     """
     Add the project root directory to sys.path.
@@ -277,37 +278,58 @@ def train():
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
     else:
-        checkpoint = "unsloth/Qwen2.5-0.5B-Instruct"
-        model, tokenizer = FastLanguageModel.from_pretrained(
+        # checkpoint = "unsloth/Qwen2.5-0.5B-Instruct"
+        # adapter_checkpoint = "/media/discoexterno/leon/ms_marco_passage/results/IR_ms_marco_peft_pretrain_100k/checkpoint-2812"
+        adapter_checkpoint = "/media/discoexterno/leon/ms_marco_passage/results/IR_ms_marco_peft_pretrain_100k/saved_model"
+
+        base_model = "unsloth/Qwen2.5-0.5B-Instruct"  # or "unsloth/Qwen2.5-0.5B", "unsloth/Qwen2.5-1.5B", etc.
+
+        tokenizer = AutoTokenizer.from_pretrained(base_model)
+        processor = AutoProcessor.from_pretrained(base_model)
+        
+        model, _ = FastLanguageModel.from_pretrained(
             # Can select any from the below:
             # "unsloth/Qwen2.5-0.5B", "unsloth/Qwen2.5-1.5B", "unsloth/Qwen2.5-3B"
             # "unsloth/Qwen2.5-14B",  "unsloth/Qwen2.5-32B",  "unsloth/Qwen2.5-72B",
             # And also all Instruct versions and Math. Coding verisons!
-            model_name = "unsloth/Qwen2.5-0.5B-Instruct",
-            max_seq_length = MAX_DOC_LEN,
+            adapter_checkpoint,
+            max_seq_length = 512,
             dtype = torch.bfloat16,
             load_in_4bit = False,
             # device_map="cuda:1",
             # token = "hf_...", # use one if using gated models like meta-llama/Llama-2-7b-hf
         )
 
+        # model.load_adapter(adapter_checkpoint)
+
+        # model.train()
+
+        # for name, param in model.named_parameters():
+        #     if "lora_" in name:  # o el sufijo/prefijo que use tu adapter
+        #         param.requires_grad = True
+
+        # print("=== Parámetros y requires_grad ===")
+        # for name, param in model.named_parameters():
+        #     print(f"{name:60s} | requires_grad = {param.requires_grad}")
+        # print("=== fin lista ===\n")
+
         print(tokenizer.pad_token_id)   # 128004
         print(tokenizer.pad_token)      # <|finetune_right_pad_id|>
 
-        model = FastLanguageModel.get_peft_model(
-            model,
-            r = 64, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
-            target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
-                            "gate_proj", "up_proj", "down_proj",],
-            lora_alpha = 16,
-            lora_dropout = 0, # Supports any, but = 0 is optimized
-            bias = "none",    # Supports any, but = "none" is optimized
-            # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
-            use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
-            random_state = 3407,
-            use_rslora = True,  # We support rank stabilized LoRA
-            loftq_config = None, # And LoftQ
-        )
+        # model = FastLanguageModel.get_peft_model(
+        #     model,
+        #     r = 64, # Choose any number > 0 ! Suggested 8, 16, 32, 64, 128
+        #     target_modules = ["q_proj", "k_proj", "v_proj", "o_proj",
+        #                     "gate_proj", "up_proj", "down_proj",],
+        #     lora_alpha = 16,
+        #     lora_dropout = 0, # Supports any, but = 0 is optimized
+        #     bias = "none",    # Supports any, but = "none" is optimized
+        #     # [NEW] "unsloth" uses 30% less VRAM, fits 2x larger batch sizes!
+        #     use_gradient_checkpointing = "unsloth", # True or "unsloth" for very long context
+        #     random_state = 3407,
+        #     use_rslora = True,  # We support rank stabilized LoRA
+        #     loftq_config = None, # And LoftQ
+        # )
     
     if which == "msmarco":
         # Apply tokenization to the dataset
@@ -319,8 +341,8 @@ def train():
         test_ds = test_ds.map(lambda x: tokenize_with_hard_negatives_messirve(tokenizer, x, append_eos=True), batched=True)
     elif which == "legal":
         # Apply tokenization to the dataset
-        train_ds = tokenize_ds_legal(tokenizer, train_ds, num_negs)
-        test_ds = tokenize_ds_legal(tokenizer, test_ds, num_negs)
+        train_ds = tokenize_ds_legal(tokenizer, train_ds, num_negs, max_doc_len=512, max_query_len=48)
+        test_ds = tokenize_ds_legal(tokenizer, test_ds, num_negs, max_doc_len=512, max_query_len=48)
     else:
         raise ValueError("Dataset not supported")
 
@@ -341,7 +363,7 @@ def train():
         output_dir=output_dir,           # Directory to save checkpoints
         evaluation_strategy="steps",     # Evaluate at the end of each epoch
         eval_steps=eval_steps,                  # Evaluate every 500 steps
-        learning_rate=5e-4,              # Learning rate
+        learning_rate=5e-5,              # Learning rate
         per_device_train_batch_size=batch_size,  # Batch size for training
         per_device_eval_batch_size=1,   # Batch size for evaluation
         gradient_accumulation_steps=gradient_accumulation_steps,
@@ -362,8 +384,6 @@ def train():
     )
 
     training_args.dataset_kwargs = {"skip_prepare_dataset": True}
-
-    processor = AutoProcessor.from_pretrained(checkpoint)
 
     # Create Trainer Instance
     trainer = InfoNCERetrievalTrainerHNLLM(
@@ -415,7 +435,7 @@ def train():
     exp_id = "exp_" + uuid.uuid4().hex[:8]
     dataset_name = "bce_ds"
     loss_name = "InfoNCE"
-    log_experiment(trainer, training_args, checkpoint, exp_id, dataset_name, loss_name, gpu_name, ir_metrics)
+    log_experiment(trainer, training_args, base_model, exp_id, dataset_name, loss_name, gpu_name, ir_metrics)
 
 if __name__ == "__main__":
     train()

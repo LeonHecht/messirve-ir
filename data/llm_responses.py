@@ -83,18 +83,18 @@ def test_request(request):
 
 
 def create_jsonl_file_legal():
-    from pydantic import BaseModel
-
-    class Annotation(BaseModel):
-        relevant: str
-        evidence: str
-
     doc_ids, docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_py.csv"))
     query_ids, queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_57.csv"))
 
     doc_dict = {str(doc_id): doc for doc_id, doc in zip(doc_ids, docs)}
 
-    print(doc_dict["37854"])
+    summary_len_dict = {}
+    for doc_id, doc in zip(doc_ids, docs):
+        len_doc = len(doc.split(" "))
+        tokens_resumen = min(512, max(128, int(len_doc * 0.08)))
+        summary_len_dict[doc_id] = tokens_resumen
+
+    # print(doc_dict["37854"])
 
     with open(Path("data") / "processed" / "doctag_runs.json", "r") as f:
         doctag_runs = json.load(f)["run"]
@@ -120,7 +120,7 @@ def create_jsonl_file_legal():
         doc_ids_preranked = [dict_["document_id"] for dict_ in topic["documents"]]
         preranked_doc_ids[qid] = doc_ids_preranked
     
-    # sys_instruct = "I have an OCR output of a legal case document that contains a lot of repeated header and footer information. Could you please remove these headers, footers, and any extraneous lines (like lines that only have digits or are very short) from the text? Other than that, keep the text as it is. Only include the cleaned text in your answer."
+    sys_instruct = "I have an OCR output of a legal case document that contains a lot of repeated header and footer information. Could you please remove these headers, footers, and any extraneous lines (like lines that only have digits or are very short) from the text? Other than that, keep the text as it is. Only include the cleaned text in your answer."
     sys_instruct = (
     "Eres un abogado penalista paraguayo. "
     "Debes decidir si un DOCUMENTO es relevante o no a una CONSULTA. "
@@ -130,11 +130,17 @@ def create_jsonl_file_legal():
 
     assert type(sys_instruct) == str, "System instruction should be a string"
 
-    user_template = (
-        "CONSULTA: {query}\n\n"
-        "DOCUMENTO: {doc}\n\n"
-        "¿El documento es relevante?"
-    )
+    user_template = [
+        "### EXPEDIENTE COMPLETO",
+        "{doc}",
+        "### FIN DEL EXPEDIENTE",
+        "",
+        "Instrucciones finales:",
+        "1. Resume en máximo {max_tokens} tokens.",
+        "2. Sigue exactamente la plantilla indicada.",
+        "3. Responde solo con el resumen en Markdown, sin comentarios extra."
+    ]
+    user_template = "\n".join(user_template)
 
     schema = {
         "type": "object",
@@ -154,14 +160,14 @@ def create_jsonl_file_legal():
     requests = []
 
     for qid, query in zip(query_ids, queries):
-        for did in preranked_doc_ids[qid]:
+        for did in doc_ids:
             requests.append({
                     "custom_id": f"{str(qid)}_{str(did)}",
                     "body": {
                         "model": "gpt-4.1-2025-04-14",
                         "messages": [
                             {"role": "system", "content": sys_instruct},
-                            {"role": "user", "content": user_template.format(query=query, doc=doc_dict[did])}
+                            {"role": "user", "content": user_template.format(doc=doc_dict[did])}
                         ],
                         "text": {
                             "format": {
@@ -393,6 +399,100 @@ def create_jsonl_inpars_mistral():
     return requests
 
 
+def create_jsonl_summary_mistral():
+    doc_ids, docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl"))
+    # query_ids, queries = get_legal_queries(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "queries_57.csv"))
+
+    doc_dict = {str(doc_id): doc for doc_id, doc in zip(doc_ids, docs)}
+
+    # summary_len_dict = {}
+    # for doc_id, doc in zip(doc_ids, docs):
+    #     len_doc = len(doc.split(" "))
+    #     tokens_resumen = min(512, max(128, int(len_doc * 0.08)))
+    #     summary_len_dict[doc_id] = tokens_resumen
+
+    sys_instruct = [
+      "Eres un relator jurídico experto de la Corte Suprema de Justicia del Paraguay.",
+      "Tu tarea es elaborar un resumen FIEL, PRECISO y SIN ALUCINACIONES del expediente que recibirás.",
+      "Lenguaje: español jurídico formal (neutro).",
+      "Prohibido inventar hechos, fechas o citas. Si algo es ambiguo, indícalo como «[AMBIGUO]».",
+      "Devuelve la salida **en formato Markdown** (no JSON) y sigue ESTRICTAMENTE la plantilla:",
+      "",
+      "### Identificación",
+        "- Órgano / Sala: …",
+        "- Expediente: …",
+        "- Fecha de resolución: …",
+        "- Tipo de proceso: …",
+        "",
+        "### Hechos clave",
+        "Breve descripción cronológica (3–4 líneas).",
+        "",
+        "### Pretensiones y agravios",
+        "Demandas principales y argumentos de cada parte.",
+        "",
+        "### Cuestiones sometidas",
+        "Lista de preguntas jurídicas que el tribunal debía resolver.",
+        "",
+        "### Decisión",
+        "- Admisibilidad: …",
+        "- Fondo: …",
+        "",
+        "### Fundamentos esenciales",
+        "Párrafo conciso con las razones jurídicas decisivas (citas de artículos, precedentes, etc.).",
+        "",
+        "### Resultado y efectos",
+        "Qué se confirma, revoca o anula; órdenes posteriores y costas.",
+        "",
+        "### Citas relevantes",
+        "Artículos del CPP, doctrina o jurisprudencia citados (máx. 5).",
+        "",
+      "Máximo 512 tokens en total para la respuesta.",
+      "Usa tono desapasionado y evita opiniones.",
+      "Si excedes el límite, recorta primero detalles menores de los fundamentos, nunca los hechos."
+    ]
+    sys_instruct = "\n".join(sys_instruct)
+    print(sys_instruct)
+
+    user_template = [
+        "### EXPEDIENTE COMPLETO",
+        "{doc}",
+        "### FIN DEL EXPEDIENTE",
+        "",
+        "Instrucciones finales:",
+        "1. Resume en máximo 512 tokens.",
+        "2. Sigue exactamente la plantilla indicada.",
+        "3. Responde solo con el resumen en Markdown, sin comentarios extra."
+    ]
+    user_template = "\n".join(user_template)
+
+    requests = []
+    for did in doc_ids:
+        max_tokens = 1024
+        requests.append({
+                "custom_id": str(did),
+                "body": {
+                    "max_tokens": max_tokens,
+                    "messages": [
+                        {"role": "system", "content": sys_instruct.format(max_tokens=max_tokens)},
+                        {"role": "user",
+                        "content": user_template.format(doc=doc_dict[str(did)], max_tokens=max_tokens)}
+                    ],
+                    # "response_format": {
+                    #     "type": "json_object",
+                    # },
+                }
+            })
+            
+    assert len(requests) == 5000
+
+        # write requests to jsonl file
+    file_path = f"batch_requests_mistral_summary.jsonl"
+    with open(file_path, "w", encoding="utf-8") as f:
+        for request in requests:
+            f.write(json.dumps(request, ensure_ascii=False) + "\n")
+    return requests
+
+
 def process_response_file(in_path, out_path):
     """ Read json file containing responses from ChatGPT Batch API.
         Then iterate over the responses and return a list of responses. 
@@ -566,14 +666,33 @@ def filter_queries_without_relevant_docs(qrels_path, queries_path):
             f.write(f"{qid}\t{query}\n")
 
 
+def create_corpus_from_summaries(summaries_file, output_file):
+    with open(summaries_file, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    with open(output_file, "w") as f:
+        for doc_id, text in data.items():
+            row = {"id": doc_id, "text": text}
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    
+    print(f"Corpus created with {len(data)} documents in {output_file}")
+        
+
+
 if __name__ == "__main__":
     # requests = create_jsonl_original_annotation_mistral()
     # requests = create_jsonl_inpars_mistral()
+    # requests = create_jsonl_summary_mistral()
 
     # process_response_file(
-    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "annotation_synthetic_mistral-small-2501.jsonl",
-    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "annotation_synthetic_mistral-small-2501_processed.json"
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "mistral_summary_1024.jsonl",
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "mistral_summary_1024_processed.json"
     # )
+
+    create_corpus_from_summaries(
+        Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "mistral_summary_1024_processed.json",
+        Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_mistral_summaries_1024.jsonl"
+    )
 
     # create_qrels_from_inpars_response(
     #     in_path=Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "inpars_mistral-small-2501_processed.json",
@@ -590,7 +709,7 @@ if __name__ == "__main__":
     #     Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "qrels_synthetic_mistral-small-2501_raw_evidence.tsv"
     # )
 
-    filter_queries_without_relevant_docs(
-        Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "qrels_synthetic_mistral-small-2501_filtered.tsv",
-        Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "consultas_sinteticas_380_unfiltered.tsv"
-    )
+    # filter_queries_without_relevant_docs(
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "qrels_synthetic_mistral-small-2501_filtered.tsv",
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "consultas_sinteticas_380_unfiltered.tsv"
+    # )

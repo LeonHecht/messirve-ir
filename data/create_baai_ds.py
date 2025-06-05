@@ -249,42 +249,42 @@ def chunk_text(
 def build_baai_ds():
     base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
     corpus_dir = os.path.join(base_dir, "corpus")
-    query_path = os.path.join(corpus_dir, "inpars_mistral-small-2501_queries_Q1.tsv")
-    corpus_path = os.path.join(corpus_dir, "corpus.jsonl")
+    query_path = os.path.join(corpus_dir, "consultas_sinteticas_380_filtered.tsv")
+    corpus_path = os.path.join(corpus_dir, "corpus_mistral_summaries_1024.jsonl")
 
     qids, queries = get_legal_queries(query_path)
     dids, docs = get_legal_dataset(corpus_path)
     doc_dict = dict(zip(dids, docs))
 
     in_paths = [
-        "bce_6x_inpars_chunked_train.tsv",
-        "bce_6x_inpars_chunked_dev.tsv",
-        "bce_6x_inpars_chunked_test.tsv",
+        "bce_6x_synthetic_train.tsv",
+        "bce_6x_synthetic_dev.tsv",
+        "bce_6x_synthetic_test.tsv",
     ]
     out_paths = [
-        "bce_6x_inpars_train_chunked_baai.jsonl",
-        "bce_6x_inpars_dev_chunked_baai.jsonl",
-        "bce_6x_inpars_test_chunked_baai.jsonl",
+        "bce_6x_synthetic_train_summary_1024_baai.jsonl",
+        "bce_6x_synthetic_dev_summary_1024_baai.jsonl",
+        "bce_6x_synthetic_test_summary_1024_baai.jsonl",
     ]
 
-    max_length = 512
-    stride = 256
+    # max_length = 512
+    # stride = 256
 
-    chunk_map: Dict[str, str] = {}
-    chunk_texts: Dict[str, str] = {}
+    # chunk_map: Dict[str, str] = {}
+    # chunk_texts: Dict[str, str] = {}
 
-    for doc_id, text in tqdm(doc_dict.items(), desc="Chunking docs"):
-        for idx, chunk in enumerate(chunk_text(text, max_length, stride)):
-            cid = f"{doc_id}__chunk{idx}"
-            chunk_map[cid] = doc_id
-            chunk_texts[cid] = chunk
+    # for doc_id, text in tqdm(doc_dict.items(), desc="Chunking docs"):
+    #     for idx, chunk in enumerate(chunk_text(text, max_length, stride)):
+    #         cid = f"{doc_id}__chunk{idx}"
+    #         chunk_map[cid] = doc_id
+    #         chunk_texts[cid] = chunk
 
     for in_path, out_path in zip(in_paths, out_paths):
-        convert_tsv_to_json_chunked(
+        convert_tsv_to_json(
             os.path.join(base_dir, "datasets", "cross_encoder", in_path),
             qids,
             queries,
-            chunk_texts,
+            doc_dict,
             os.path.join(base_dir, "datasets", "dual_encoder", out_path),
             prompt="Documento legal con el siguiente tema: "
         )
