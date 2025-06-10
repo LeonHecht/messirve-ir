@@ -42,6 +42,23 @@ def get_msmarco_passages():
     return pid_to_passage
 
 
+def get_msmarco_docs():
+    print("Loading MS MARCO passages...", end="")
+    save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", "pid_to_doc.pkl")
+    if os.path.exists(save_path):
+        with open(save_path, "rb") as f:
+            pid_to_passage = pickle.load(f)
+    else:
+        passage_dataset = load_dataset("sentence-transformers/msmarco-corpus", "passage", split="train")
+        pid_to_passage = dict(zip(passage_dataset["pid"], passage_dataset["text"]))
+        # print(pid_to_passage[7349777])
+        # => "liberal arts. 1. the academic course of instruction at a college 
+        with open(save_path, "wb") as f:
+            pickle.dump(pid_to_passage, f)
+    print("Done")
+    return pid_to_passage
+
+
 def get_msmarco_hard_negatives(num_negs, reload=False):
     print("Loading hard negatives...", end="")
     save_path = os.path.join(STORAGE_DIR, "ms_marco_passage", "data", f"negatives_{num_negs}_msmarco.pkl")
@@ -168,6 +185,7 @@ def tokenize_with_manual_eos(tokenizer, text_list, max_length):
 
     # 2) Manually append EOS for each sequence
     eos_id = tokenizer.eos_token_id
+
     new_input_ids = []
     new_attention_masks = []
 

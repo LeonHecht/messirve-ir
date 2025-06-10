@@ -6,7 +6,7 @@ import torch
 import pytrec_eval
 from .train_utils import tokenize_with_manual_eos, get_eos_embeddings
 from torch.utils.data import DataLoader, TensorDataset
-from config.config import MAX_QUERY_LEN, MAX_DOC_LEN
+from config.config import MAX_QUERY_LEN, MAX_DOC_LEN, STORAGE_DIR
 import torch.nn.functional as F
 try:
     import faiss
@@ -329,13 +329,13 @@ def embed_jina(model, docs, queries, doc_ids, query_ids):
     # Alternatively, you can choose not to pass a `task`, and no specific LoRA adapter will be used.
     print("Encoding queries...", end="")
     embeddings_queries = batch_encode_jina(
-        model, queries, batch_size=128, task="retrieval.query", max_length=MAX_QUERY_LEN
+        model, queries, batch_size=4, task="retrieval.query", max_length=MAX_QUERY_LEN
     )
     print("Done.")
 
     print("Encoding docs...", end="")
     embeddings_docs = batch_encode_jina(
-        model, docs, batch_size=128, task="retrieval.passage", max_length=MAX_DOC_LEN
+        model, docs, batch_size=4, task="retrieval.passage", max_length=MAX_DOC_LEN
     )
     print("Done.")
 
@@ -403,12 +403,12 @@ def embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run):
     """
     embeddings_queries = model.encode(queries, batch_size=8, max_length=MAX_QUERY_LEN)['dense_vecs']
     # Embed entire corpus if file does not exist
-    path = 'corpus/embeddings_train_corpus_bge-m3.npy'
+    path = os.path.join(STORAGE_DIR, 'legal_ir/data/corpus/embeddings/bge-m3_corpus_inpars.npy')
     if not os.path.exists(path) or not reuse_run:
         print("Embedding docs...", end="")
         embeddings_docs = model.encode(docs, batch_size=8, max_length=MAX_DOC_LEN)['dense_vecs']
         print("Done.")
-        # save embeddings
+        # # save embeddings
         # print("Saving embeddings...", end="")
         # np.save(path, embeddings_docs)
         # print("Done.")
@@ -579,6 +579,134 @@ def embed_bge_sliding_window(model, doc_dict, query_dict, reuse_run):
 
     # 5) retrieve using your existing function
     run = retrieve(list(query_dict.keys()), list(doc_dict.keys()), sim)
+    return run
+
+
+def embed_bge_paragraph_chunking_dense(model, doc_dict, query_dict, reuse_run):
+    """
+    Embed queries y documentos chunked por párrafos usando solo el head dense de BGE-M3.
+
+    Esta función divide cada documento en párrafos (split por doble salto de línea),
+    codifica queries y párrafos con el head denso (max_length=512), calcula la matriz
+    de similitud densa cruda (Q × total_parrafos), aplica pooling por documento
+    (top-3 pooling) y finalmente llama a retrieve() para devolver los resultados.
+
+    Parameters
+    ----------
+    model : BGEM3FlagModel
+        Instancia del modelo BGE-M3.
+    doc_dict : dict of {hashable: str}
+        Mapping de doc_id a texto completo del documento.
+    query_dict : dict of {hashable: str}
+        Mapping de query_id a texto de la consulta.
+    reuse_run : bool
+        Indicador para reusar resultados previos (no usado en esta implementación).
+
+    Returns
+    -------
+    dict
+        Diccionario que mapea cada tipo de run ("dense") a su diccionario de resultados:
+            {"dense": { query_id: [(score, texto_doc, doc_id), …], … }}.
+    """
+    # Parámetros fijos
+    chunk_max_len = 128
+    pooling_strategy = "top_3"
+    top_k = 3
+
+    # 1) Preparar listas ordenadas de IDs y textos
+    doc_ids = list(doc_dict.keys())
+    query_ids = list(query_dict.keys())
+    query_texts = [query_dict[qid] for qid in query_ids]
+
+    # 2) Instanciar tokenizer rápido de BGE-M3
+    tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-m3", use_fast=True)
+
+    # 3) Construir lista de (doc_id, párrafo_texto)
+    chunk_map = []
+    for doc_id in tqdm(doc_ids, desc="Identificando párrafos"):
+        full_text = doc_dict[doc_id]
+        paragraphs = full_text.split("\n\n")
+        if len(paragraphs) == 1:
+            para = paragraphs[0].strip()
+            if para:
+                chunk_map.append((doc_id, para))
+        else:
+            for para in paragraphs:
+                para = para.strip()
+                if para:
+                    chunk_map.append((doc_id, para))
+
+    # Si no hay párrafos, fallback a embed_bge_sliding_window_dense
+    if not chunk_map:
+        # Si necesitas una versión sin chunking, puedes llamar a:
+        # return embed_bge_sliding_window_dense(model, doc_dict, query_dict, reuse_run)
+        raise ValueError("No se encontraron párrafos válidos en doc_dict")
+
+    # 4) Desempaquetar listas de IDs de chunk y textos de chunk
+    chunk_doc_ids = [did for did, _ in chunk_map]
+    chunk_texts = [text for _, text in chunk_map]
+
+    # 5) Codificar queries (dense only)
+    print("Embedding queries (head denso)…", end="")
+    q_out = model.encode(
+        query_texts,
+        batch_size=16,
+        max_length=MAX_QUERY_LEN,
+        return_dense=True,
+        return_sparse=False,
+        return_colbert_vecs=False,
+    )
+    print(" listo.")
+    q_dense = torch.tensor(q_out["dense_vecs"], dtype=torch.float32,
+                           device=q_out["dense_vecs"].device)
+
+    # 6) Codificar párrafos (dense only)
+    print("Embedding párrafos (head denso)…", end="")
+    c_out = model.encode(
+        chunk_texts,
+        batch_size=16,
+        max_length=chunk_max_len,
+        return_dense=True,
+        return_sparse=False,
+        return_colbert_vecs=False,
+    )
+    print(" listo.")
+    c_dense = torch.tensor(c_out["dense_vecs"], dtype=torch.float32,
+                           device=c_out["dense_vecs"].device)
+
+    # 7) Calcular similitud densa cruda: (Q × total_parrafos)
+    dense_raw = q_dense @ c_dense.T  # (Q, C)
+
+    # 8) Pooling por documento
+    Q = dense_raw.size(0)
+    D = len(doc_ids)
+    device = dense_raw.device
+
+    dense_sim = torch.full((Q, D), -np.inf, device=device)
+
+    pools = {}
+    for idx, did in enumerate(chunk_doc_ids):
+        pools.setdefault(did, []).append(idx)
+
+    for j, did in enumerate(tqdm(doc_ids, desc="Pooling por documento")):
+        idxs = pools.get(did, [])
+        if not idxs:
+            continue
+
+        idx_tensor = torch.tensor(idxs, dtype=torch.long, device=device)
+        if pooling_strategy == "max":
+            dense_sim[:, j], _ = dense_raw[:, idx_tensor].max(dim=1)
+        else:  # "top_3"
+            k = min(top_k, len(idxs))
+            if k < top_k:
+                print(f"Advertencia: doc {did} tiene solo {len(idxs)} párrafos.")
+            vals_d, _ = dense_raw[:, idx_tensor].topk(k, dim=1)
+            dense_sim[:, j] = vals_d.mean(dim=1)
+
+    # 9) Llamar a retrieve() con la matriz (Q, D) en CPU
+    dense_sim = dense_sim.cpu()
+    run = retrieve(query_ids, doc_ids, dense_sim)
+
     return run
 
 
@@ -757,7 +885,7 @@ def embed_bge_sparse(model, docs, queries, doc_ids, query_ids, reuse_run):
     return runs
 
 
-def embed_bge_sparse_sliding_window(model, doc_dict, query_dict, reuse_run):
+def embed_bge_hybrid_sliding_window(model, doc_dict, query_dict, reuse_run):
     """
     Embed queries and chunked documents con BGE-M3 (dense, sparse y ColBERT),
     aplica ventana deslizante a los documentos y agrupa las similitudes por documento.
@@ -941,6 +1069,241 @@ def embed_bge_sparse_sliding_window(model, doc_dict, query_dict, reuse_run):
     return runs
 
 
+def embed_bge_sparse_sliding_window(model, doc_dict, query_dict, reuse_run):
+    """
+    Embed queries and chunked documents con BGE-M3 (dense, sparse y ColBERT),
+    aplica ventana deslizante a los documentos y agrupa las similitudes por documento.
+
+    Parameters
+    ----------
+    model : BGEM3FlagModel
+        Instancia del modelo BGE-M3.
+    doc_dict : dict of {hashable: str}
+        Mapping de doc_id a texto completo del documento.
+    query_dict : dict of {hashable: str}
+        Mapping de query_id a texto de la consulta.
+    reuse_run : bool
+        Indicador para reusar coridas previas (no utilizado aquí).
+
+    Returns
+    -------
+    dict of str -> dict
+        Diccionario que mapea nombre de run a los resultados de recuperación:
+        run_name -> { query_id: [(score, doc_text, doc_id), ...], ... }.
+    """
+    # Parámetros de la ventana deslizante
+    chunk_size = 512
+    stride = 128
+
+    # Listas ordenadas de IDs y textos
+    doc_ids = list(doc_dict.keys())
+    query_ids = list(query_dict.keys())
+    query_texts = list(query_dict.values())
+
+    # Instancio un tokenizer rápido para BGE-M3
+    tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-m3", use_fast=True)
+
+    # 1) Construir lista plana de (doc_id, texto_chunk)
+    chunk_map = []
+    for doc_id in tqdm(doc_ids, desc="Chunking docs"):
+        text = doc_dict[doc_id]
+        toks = tokenizer.encode(text, add_special_tokens=False)
+        for start in range(0, len(toks), stride):
+            window = toks[start:start + chunk_size]
+            if not window:
+                break
+            chunk_text = tokenizer.decode(window, skip_special_tokens=True)
+            chunk_map.append((doc_id, chunk_text))
+
+    # Desempaquetar listas de IDs de chunk y textos de chunk
+    chunk_doc_ids = [did for did, _ in chunk_map]
+    chunk_texts = [ct for _, ct in chunk_map]
+
+    # 2) Codificar queries (dense, sparse y ColBERT)
+    print("Embedding queries...", end="")
+    q_out = model.encode(
+        query_texts,
+        batch_size=8,
+        max_length=MAX_QUERY_LEN,
+        return_dense=False,
+        return_sparse=True,
+        return_colbert_vecs=False,
+    )
+    print("Done.")
+
+    # 3) Codificar chunks (dense, sparse y ColBERT)
+    print("Embedding chunks...", end="")
+    c_out = model.encode(
+        chunk_texts,
+        batch_size=2,
+        max_length=chunk_size,
+        return_dense=False,
+        return_sparse=True,
+        return_colbert_vecs=False,
+    )
+    print("Done.")
+
+    # Sparse
+    sparse_raw = compute_sparse_similarity(
+        model,
+        q_out["lexical_weights"],
+        c_out["lexical_weights"],
+    )
+
+    # 5) Pooling por documento usando max o top-k
+    Q = sparse_raw.size(0)
+    D = len(doc_dict)
+    device = sparse_raw.device
+
+    # Inicializo matrices de similitud documento-nivel
+    sparse_sim = torch.full((Q, D), -np.inf, device=device)
+
+    # Mapear cada doc_id a los índices de chunk correspondientes
+    pools = {}
+    for idx, did in enumerate(chunk_doc_ids):
+        pools.setdefault(did, []).append(idx)
+
+    pooling_strategy = "top_3"
+    top_k = 3
+
+    for j, did in enumerate(tqdm(doc_ids, desc="Pooling chunks")):
+        idxs = pools.get(did, [])
+        if not idxs:
+            continue
+
+        idx_tensor = torch.tensor(idxs, dtype=torch.long, device=device)
+
+        # Sparse pooling
+        if pooling_strategy == "max":
+            sparse_sim[:, j], _ = sparse_raw[:, idx_tensor].max(dim=1)
+        else:
+            k = min(top_k, len(idxs))
+            vals, _ = sparse_raw[:, idx_tensor].topk(k, dim=1)
+            sparse_sim[:, j] = vals.mean(dim=1)
+
+    return retrieve(query_ids, doc_ids, sparse_sim.cpu())
+
+
+def embed_bge_colbert_sliding_window(model, doc_dict, query_dict, reuse_run):
+    """
+    Embed queries y documentos chunked usando solo los ColBERT vectors de BGE-M3,
+    aplica ventana deslizante a los documentos y agrupa las similitudes por documento.
+
+    Parameters
+    ----------
+    model : BGEM3FlagModel
+        Instancia del modelo BGE-M3.
+    doc_dict : dict of {hashable: str}
+        Mapping de doc_id a texto completo del documento.
+    query_dict : dict of {hashable: str}
+        Mapping de query_id a texto de la consulta.
+    reuse_run : bool
+        (No usado aquí, pero mantenido para compatibilidad con otras funciones.)
+
+    Returns
+    -------
+    dict
+        Diccionario que mapea cada query_id a una lista de tuplas
+        (score, texto_documento, doc_id) obtenidas por retrieve().
+    """
+    # Parámetros de ventana deslizante
+    chunk_size = 512
+    stride = 128
+
+    # 1) Listas ordenadas de IDs y textos
+    doc_ids = list(doc_dict.keys())
+    query_ids = list(query_dict.keys())
+    query_texts = [query_dict[qid] for qid in query_ids]
+
+    # 2) Instanciar un tokenizer rápido para BGE-M3
+    tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-m3", use_fast=True)
+
+    # 3) Construir lista plana de (doc_id, texto_chunk)
+    chunk_map = []
+    for doc_id in tqdm(doc_ids, desc="Chunking docs"):
+        text = doc_dict[doc_id]
+        toks = tokenizer.encode(text, add_special_tokens=False)
+        for start in range(0, len(toks), stride):
+            window = toks[start : start + chunk_size]
+            if not window:
+                break
+            chunk_text = tokenizer.decode(window, skip_special_tokens=True)
+            chunk_map.append((doc_id, chunk_text))
+
+    # Si no hay chunks, devolvemos un embed_bge colbert normal sin sliding window
+    if len(chunk_map) == 0:
+        raise ValueError("No chunks created. Check chunk size and stride parameters.")
+
+    # 4) Desempaquetar listas de IDs de chunk y textos de chunk
+    chunk_doc_ids = [did for did, _ in chunk_map]
+    chunk_texts = [ct for _, ct in chunk_map]
+
+    # 5) Embed queries (solo ColBERT)
+    print("Embedding queries...", end="")
+    q_out = model.encode(
+        query_texts,
+        batch_size=8,
+        max_length=MAX_QUERY_LEN,
+        return_colbert_vecs=True,
+    )
+    print("Done.")
+
+    # 6) Embed chunks (solo ColBERT)
+    print("Embedding chunks...", end="")
+    c_out = model.encode(
+        chunk_texts,
+        batch_size=2,
+        max_length=chunk_size,
+        return_colbert_vecs=True,
+        return_dense=False,
+        return_sparse=False,
+    )
+    print("Done.")
+
+    # 7) Calcular similitud ColBERT cruda: (Q x C)
+    colbert_raw = compute_colbert_similarity(
+        q_out["colbert_vecs"], c_out["colbert_vecs"], model
+    )
+    # colbert_raw es un tensor (Q, C)
+
+    # 8) Pooling por documento usando max o top-k
+    Q = colbert_raw.size(0)
+    D = len(doc_ids)
+    device = colbert_raw.device
+
+    # Inicializar matriz de similitudes a nivel de documento
+    colbert_sim = torch.full((Q, D), -np.inf, device=device)
+
+    # Mapear cada doc_id a los índices de chunk correspondientes
+    pools = {}
+    for idx, did in enumerate(chunk_doc_ids):
+        pools.setdefault(did, []).append(idx)
+
+    pooling_strategy = "top_3"
+    top_k = 3
+
+    for j, did in enumerate(tqdm(doc_ids, desc="Pooling chunks")):
+        idxs = pools.get(did, [])
+        if not idxs:
+            continue
+
+        idx_tensor = torch.tensor(idxs, dtype=torch.long, device=device)
+
+        if pooling_strategy == "max":
+            colbert_sim[:, j], _ = colbert_raw[:, idx_tensor].max(dim=1)
+        else:  # "top_3"
+            k = min(top_k, len(idxs))
+            if k < top_k:
+                print(f"Warning: fewer than {top_k} chunks for doc {did}.")
+            vals, _ = colbert_raw[:, idx_tensor].topk(k, dim=1)
+            colbert_sim[:, j] = vals.mean(dim=1)
+
+    # 9) Llamar a retrieve con la matriz (Q, D) en CPU
+    colbert_sim = colbert_sim.cpu()
+    run = retrieve(query_ids, doc_ids, colbert_sim)
+    return run
+
+
 def get_sim_bge(model, docs, queries):
     embeddings_queries = model.encode(queries, batch_size=8, max_length=MAX_QUERY_LEN)['dense_vecs']
     print("Embedding docs...", end="")
@@ -1005,6 +1368,134 @@ def embed_qwen(model, tokenizer, docs, queries, doc_ids, query_ids):
 
     similarity = compute_similarity(embeddings_queries, embeddings_docs)
     run = retrieve(query_ids, doc_ids, similarity)
+    return run
+
+
+def embed_qwen_sliding_window(model, tokenizer, doc_dict, query_dict):
+    """
+    Embed queries y documentos chunked usando Qwen con lógica de ventana deslizante,
+    pool las similitudes a nivel de documento y llama a retrieve().
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Instancia del modelo Qwen (BAAI embeddings).
+    tokenizer : transformers.PreTrainedTokenizer
+        Tokenizer asociado al modelo Qwen.
+    doc_dict : dict of {hashable: str}
+        Mapeo de doc_id a texto completo del documento.
+    query_dict : dict of {hashable: str}
+        Mapeo de query_id a texto de la consulta.
+
+    Returns
+    -------
+    dict
+        Mapeo de cada query_id a una lista ordenada de tuplas
+        (score, texto_documento, doc_id), según retrieve().
+    """
+    # Parámetros de chunking
+    chunk_size = 512
+    stride = 256
+    chunk_batch_size = 32
+    device = next(model.parameters()).device
+
+    # 1) Prepara IDs y textos
+    doc_ids = list(doc_dict.keys())
+    query_ids = list(query_dict.keys())
+    query_texts = [query_dict[qid] for qid in query_ids]
+
+    # 2) Embedding de consultas (dense EOS) en batches
+    print("Tokenizando y embebiendo consultas...", end="")
+    # tokenize_with_manual_eos devuelve {'input_ids': [...], 'attention_mask': [...]}
+    q_inputs = tokenize_with_manual_eos(tokenizer, query_texts, max_length=MAX_QUERY_LEN)
+    q_input_ids = torch.tensor(q_inputs["input_ids"], dtype=torch.long)
+    q_attention_mask = torch.tensor(q_inputs["attention_mask"], dtype=torch.long)
+    query_dataset = TensorDataset(q_input_ids, q_attention_mask)
+    query_loader = DataLoader(query_dataset, batch_size=chunk_batch_size, pin_memory=True)
+
+    embeddings_queries = []
+    with torch.no_grad():
+        for input_ids_batch, attn_batch in tqdm(query_loader, desc="Embebiendo queries"):
+            input_ids_batch = input_ids_batch.to(device)
+            attn_batch = attn_batch.to(device)
+            q_embeds = get_eos_embeddings(
+                model, input_ids_batch, attn_batch, tokenizer
+            )  # (batch_size, hidden_dim)
+            embeddings_queries.append(q_embeds.cpu())
+    embeddings_queries = torch.cat(embeddings_queries, dim=0).to(device)  # (Q, H)
+    print("hecho.")
+
+    # 3) Construir lista flat de (doc_id, chunk_text)
+    print("Chunking documentos...", end="")
+    chunk_map = []
+    for doc_id in tqdm(doc_ids, desc="Preparando chunks"):
+        text = doc_dict[doc_id]
+        # tokenizamos SIN special tokens para poder windowizar
+        toks = tokenizer.encode(text, add_special_tokens=False)
+        for start in range(0, len(toks), stride):
+            window = toks[start : start + chunk_size]
+            if not window:
+                break
+            # Reconstruimos texto chunk con decode; tokenizer añadirá después su propio EOS
+            chunk_text = tokenizer.decode(window, skip_special_tokens=True)
+            chunk_map.append((doc_id, chunk_text))
+    print("hecho.")
+
+    # Si no hay chunks, terminamos temprano con embed_qwen normal
+    if len(chunk_map) == 0:
+        # fallback a embed_qwen convencional
+        return embed_qwen(model, tokenizer, doc_dict, query_texts, doc_ids, query_ids)
+
+    # 4) Prepara tensores de pooling: (Q, D) llenos con -inf
+    Q = embeddings_queries.size(0)
+    D = len(doc_ids)
+    dense_sim = torch.full((Q, D), -np.inf, device=device)
+
+    # 5) Mapea doc_id a índice j en doc_ids
+    doc_index = {doc_id: idx for idx, doc_id in enumerate(doc_ids)}
+
+    # 6) Itera sobre chunks en bloques para no saturar RAM
+    total_chunks = len(chunk_map)
+    num_batches = (total_chunks + chunk_batch_size - 1) // chunk_batch_size
+
+    print("Embebiendo chunks por batches y actualizando pooling...", end="")
+    for b in tqdm(range(num_batches), desc="Batches de chunks"):
+        start_idx = b * chunk_batch_size
+        end_idx = min(start_idx + chunk_batch_size, total_chunks)
+        batch = chunk_map[start_idx:end_idx]
+        batch_texts = [chunk_text for _, chunk_text in batch]
+        batch_doc_idxs = [doc_index[doc_id] for doc_id, _ in batch]
+
+        # Tokenizar LOTE de chunks (añade special tokens que incluyen EOS)
+        enc = tokenize_with_manual_eos(tokenizer, batch_texts, max_length=chunk_size)
+        
+        input_ids_batch = torch.tensor(enc["input_ids"], dtype=torch.long).to(device)
+        attn_batch = torch.tensor(enc["attention_mask"], dtype=torch.long).to(device)
+        
+        with torch.no_grad():
+            c_embeds = get_eos_embeddings(
+                model, input_ids_batch, attn_batch, tokenizer
+            )  # (batch_size, hidden_dim)
+
+        # 7) Calcula similitud cruda: (Q, batch_size)
+        # embeddings_queries: (Q, H); c_embeds: (batch, H)
+        sim_raw = embeddings_queries @ c_embeds.T  # (Q, batch)
+
+        # 8) Pooling máximo por documento
+        for idx_in_batch, doc_idx in enumerate(batch_doc_idxs):
+            # max pooling: si hay más chunks del mismo doc en este batch,
+            # torch.max repetido se encarga de conservar máximo histórico
+            dense_sim[:, doc_idx] = torch.maximum(
+                dense_sim[:, doc_idx], sim_raw[:, idx_in_batch]
+            )
+
+        # Liberar tensores intermedios
+        del c_embeds, sim_raw, enc
+    print("hecho.")
+
+    # 9) Llamar a retrieve con la matriz (Q, D) en CPU
+    dense_sim = dense_sim.cpu()
+    run = retrieve(query_ids, doc_ids, dense_sim)
     return run
 
 
@@ -1754,7 +2245,7 @@ def rerank_cross_encoder_chunked(model,
                                  max_length,
                                  stride,
                                  aggregator="max",
-                                 batch_size=512):
+                                 batch_size=256):
     """
     Rerank the provided run using a cross-encoder with sliding-window chunking.
 
@@ -1813,11 +2304,7 @@ def rerank_cross_encoder_chunked(model,
 
     for qid, scores_dict in tqdm(run.items(), desc="Queries", leave=False):
         # Pick top_k docs for this query
-        top_docs = sorted(
-            scores_dict.items(),
-            key=lambda x: x[1],
-            reverse=True
-        )[:top_k]
+        top_docs = sorted(scores_dict.items(), key=lambda x: x[1], reverse=True)[:top_k]
         doc_ids = [doc_id for doc_id, _ in top_docs]
         docs = [doc_dict[str(doc_id)] for doc_id in doc_ids]
         query_texts = [query_dict[qid]] * len(docs)
@@ -1832,20 +2319,25 @@ def rerank_cross_encoder_chunked(model,
             stride=stride,
             return_overflowing_tokens=True,
             return_tensors="pt"
-        ).to(device)
+        )
 
-        input_ids = encoding["input_ids"]
-        attention_mask = encoding["attention_mask"]
+        overflow_map = encoding["overflow_to_sample_mapping"].cpu()  # Tensor con tamaño (C,)
+
+        # Ahora movemos solo los tensores que usamos para scoring
+        input_ids = encoding["input_ids"].to(device)             # (C, L)
+        attention_mask = encoding["attention_mask"].to(device)   # (C, L)
         token_type_ids = encoding.get("token_type_ids")
-        overflow_map = encoding["overflow_to_sample_mapping"].tolist()
+        if token_type_ids is not None:
+            token_type_ids = token_type_ids.to(device)            # (C, L)
 
-        # Collect chunk scores per document
-        doc_chunk_scores = {doc_id: [] for doc_id in doc_ids}
         total_chunks = input_ids.size(0)
+        # Inicializar lista de listas para scores de chunks por doc_idx
+        num_top_docs = len(doc_ids)
+        doc_chunk_scores = [[] for _ in range(num_top_docs)]
 
         # Batch-score all chunks
         for start in range(0, total_chunks, batch_size):
-            end = start + batch_size
+            end = min(start + batch_size, total_chunks)
             batch = {
                 "input_ids": input_ids[start:end],
                 "attention_mask": attention_mask[start:end]
@@ -1872,30 +2364,34 @@ def rerank_cross_encoder_chunked(model,
                 scores = logits[:, 0]
             else:
                 scores = logits.squeeze(-1)
+            
+            # Mover a CPU y emparejar con overflow_map solo esta porción
+            scores_cpu = scores.cpu()
+            batch_overflows = overflow_map[start:end]  # tensor CPU
 
-            # Map chunk scores back to documents
-            for idx, score in enumerate(scores.cpu().tolist(), start=start):
-                doc_idx = overflow_map[idx]
-                doc_id = doc_ids[doc_idx]
-                doc_chunk_scores[doc_id].append(score)
+            # Asignar cada score al doc_idx correspondiente
+            for i, doc_idx in enumerate(batch_overflows.tolist()):
+                doc_chunk_scores[doc_idx].append(scores_cpu[i].item())
 
         # Aggregate scores per document
         reranked_run[qid] = {}
-        for doc_id, chunk_scores in doc_chunk_scores.items():
+        for idx, doc_id in enumerate(doc_ids):
+            chunk_scores = doc_chunk_scores[idx]
             if not chunk_scores:
                 agg_score = float("-inf")
-            elif aggregator == "max":
-                agg_score = max(chunk_scores)
-            elif aggregator == "mean":
-                agg_score = sum(chunk_scores) / len(chunk_scores)
-            elif aggregator == "top3":
-                top3 = sorted(chunk_scores, reverse=True)[:3]
-                agg_score = sum(top3) / len(top3)
-            elif aggregator == "top10":
-                top10 = sorted(chunk_scores, reverse=True)[:10]
-                agg_score = sum(top10) / len(top10)
             else:
-                raise ValueError(f"Unknown aggregator: {aggregator}")
+                if aggregator == "max":
+                    agg_score = max(chunk_scores)
+                elif aggregator == "mean":
+                    agg_score = sum(chunk_scores) / len(chunk_scores)
+                elif aggregator == "top3":
+                    top3 = sorted(chunk_scores, reverse=True)[:3]
+                    agg_score = sum(top3) / len(top3)
+                elif aggregator == "top10":
+                    top10 = sorted(chunk_scores, reverse=True)[:10]
+                    agg_score = sum(top10) / len(top10)
+                else:
+                    raise ValueError(f"Unknown aggregator: {aggregator}")
             reranked_run[qid][doc_id] = float(agg_score)
 
     # Merge with original run if needed

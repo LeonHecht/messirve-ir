@@ -90,8 +90,8 @@ if __name__ == "__main__":
     # # Convert the CSV file to TSV format
     # convert_csv_to_tsv(input_csv, output_tsv)
 
-    # convert_csv_to_jsonl(
-    #     os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_py.csv"),
-    #     os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl"),
-    # )
-    select_qrels_for_meta_annotation()
+    convert_csv_to_jsonl(
+        os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_tesseract.csv"),
+        os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_tesseract.jsonl"),
+    )
+    # select_qrels_for_meta_annotation()

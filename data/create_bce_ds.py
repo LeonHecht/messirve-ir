@@ -8,6 +8,7 @@ from rank_bm25 import BM25Okapi
 from tqdm import tqdm
 import os
 import sys
+print(f"Executable: {sys.executable}")
 from typing import List, Dict, Set
 
 def configure_python_path():
@@ -448,10 +449,11 @@ def main_create_scenario_datasets():
       S4: query‑wise split, annotated + extras at 2× and 3×
     """
     base = Path(STORAGE_DIR) / "legal_ir" / "data"
-    # ann  = base / "annotations" / "qrels_py.tsv"
-    ann  = base / "annotations" / "inpars_mistral-small-2501_qrels_Q1.tsv"
+    ann  = base / "annotations" / "qrels_54.tsv"
+    # ann  = base / "annotations" / "inpars_mistral-small-2501_qrels_Q1.tsv"
+    # corp = base / "corpus" / "corpus.jsonl"
     corp = base / "corpus" / "corpus_mistral_summaries_1024.jsonl"
-    qry  = base / "corpus" / "inpars_mistral-small-2501_queries_Q1.tsv"
+    qry  = base / "corpus" / "queries_54.tsv"
     out  = base / "datasets" / "cross_encoder"
     out.mkdir(parents=True, exist_ok=True)
 
@@ -504,9 +506,9 @@ def main_create_scenario_datasets():
     #             seed=seed
     #         )
     
-    train_qids = load_qids(base / "qids_inpars_train.txt")
-    dev_qids   = load_qids(base / "qids_inpars_dev.txt")
-    test_qids  = load_qids(base / "qids_inpars_test.txt")
+    train_qids = load_qids(base / "qids_train.txt")
+    dev_qids   = load_qids(base / "qids_dev.txt")
+    test_qids  = load_qids(base / "qids_test.txt")
     for split_name, qids in [("train", train_qids), ("dev", dev_qids), ("test", test_qids)]:
         # build_ce_dataset(
         #     qrels_path=str(ann),
@@ -525,10 +527,12 @@ def main_create_scenario_datasets():
             neg_labels=[0],
             corpus_path=str(corp),
             queries_path=str(qry),
-            output_path=str(out / f"bce_6x_inpars_summary_1024_{split_name}.tsv"),
+            output_path=str(out / f"bce_6x_summary_1024_{split_name}.tsv"),
             qid_filter=qids,
             neg_ratio=6,
-            seed=seed
+            seed=seed,
+            # max_length=512,
+            # stride=256,
         )
 
 if __name__ == "__main__":

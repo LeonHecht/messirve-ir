@@ -29,12 +29,12 @@ from config.config import STORAGE_DIR
 def finetune():
     base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
     
-    train_ds_path = "bce_6x_inpars_synthetic_chunked_baai.jsonl"
+    train_ds_path = "bce_6x_summary_1024_baai.jsonl"
     train_ds_path = os.path.join(base_dir, "datasets", "dual_encoder", train_ds_path)
 
     output_dir = os.path.join(STORAGE_DIR, "legal_ir", "results", "baai_finetuning")
 
-    run_name = "bge-m3_full_6x_chunked_self_distill_unified"
+    run_name = "bge-m3_6x_54_summary_1024"
 
     output_dir = os.path.join(output_dir, run_name)
 
@@ -47,7 +47,7 @@ def finetune():
     --cache_path ./cache/data \
     --train_group_size 7 \
     --query_max_len 48 \
-    --passage_max_len 512 \
+    --passage_max_len 4096 \
     --pad_to_multiple_of 8 \
     --knowledge_distillation False \
     --same_dataset_within_batch True \
@@ -63,22 +63,22 @@ def finetune():
     --dataloader_drop_last True \
     --warmup_ratio 0.1 \
     --gradient_checkpointing \
-    --logging_steps 10 \
+    --logging_steps 1 \
     --save_steps 200 \
     --negatives_cross_device \
     --temperature 0.02 \
     --sentence_pooling_method cls \
     --normalize_embeddings True \
     --kd_loss_type m3_kd_loss \
-    --unified_finetuning True \
-    --use_self_distill True \
+    --unified_finetuning False \
+    --use_self_distill False \
     --fix_encoder False \
-    --self_distill_start_step 0 \
     --max_grad_norm 0.5 \
     --bf16 \
     --save_total_limit 2 \
-    > m3_full_6x_chunked_self_distill_unified.log 2>&1 &
+    > bge-m3_6x_54_summary_1024.log 2>&1 &
 """
+    # --self_distill_start_step 0 \
     # --resume_from_checkpoint {os.path.join(output_dir, "checkpoint-5400")} \
 
     # execute command in terminal

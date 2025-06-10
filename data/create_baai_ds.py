@@ -66,11 +66,11 @@ def convert_tsv_to_json_chunked(
     with open(tsv_path, 'r', encoding='utf-8', newline='') as tsv_in:
         reader = csv.DictReader(tsv_in, delimiter='\t')
         for row in reader:
-            qid = row['qid']
-            cid = row['chunk_id']
+            qid = str(row['qid'])
+            cid = str(row['chunk_id'])
             label = row['label']
             grouped.setdefault(qid, {'pos': [], 'neg': []})
-            text = chunk_texts.get(cid, '')
+            text = chunk_texts[cid]
             if label == '1':
                 grouped[qid]['pos'].append(text)
             else:
@@ -249,7 +249,9 @@ def chunk_text(
 def build_baai_ds():
     base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
     corpus_dir = os.path.join(base_dir, "corpus")
-    query_path = os.path.join(corpus_dir, "consultas_sinteticas_380_filtered.tsv")
+    # query_path = os.path.join(corpus_dir, "consultas_sinteticas_380_filtered.tsv")
+    query_path = os.path.join(corpus_dir, "queries_54.tsv")
+    # corpus_path = os.path.join(corpus_dir, "corpus.jsonl")
     corpus_path = os.path.join(corpus_dir, "corpus_mistral_summaries_1024.jsonl")
 
     qids, queries = get_legal_queries(query_path)
@@ -257,27 +259,32 @@ def build_baai_ds():
     doc_dict = dict(zip(dids, docs))
 
     in_paths = [
-        "bce_6x_synthetic_train.tsv",
-        "bce_6x_synthetic_dev.tsv",
-        "bce_6x_synthetic_test.tsv",
+        "bce_6x_summary_1024_train.tsv",
+        "bce_6x_summary_1024_dev.tsv",
+        "bce_6x_summary_1024_test.tsv",
     ]
     out_paths = [
-        "bce_6x_synthetic_train_summary_1024_baai.jsonl",
-        "bce_6x_synthetic_dev_summary_1024_baai.jsonl",
-        "bce_6x_synthetic_test_summary_1024_baai.jsonl",
+        "bce_6x_summary_1024_train_baai.jsonl",
+        "bce_6x_summary_1024_dev_baai.jsonl",
+        "bce_6x_summary_1024_test_baai.jsonl",
     ]
 
-    # max_length = 512
-    # stride = 256
+    chunked = False
 
-    # chunk_map: Dict[str, str] = {}
-    # chunk_texts: Dict[str, str] = {}
+    if chunked:
+        max_length = 512
+        stride = 256
 
-    # for doc_id, text in tqdm(doc_dict.items(), desc="Chunking docs"):
-    #     for idx, chunk in enumerate(chunk_text(text, max_length, stride)):
-    #         cid = f"{doc_id}__chunk{idx}"
-    #         chunk_map[cid] = doc_id
-    #         chunk_texts[cid] = chunk
+        chunk_map: Dict[str, str] = {}
+        chunk_dict: Dict[str, str] = {}
+
+        for doc_id, text in tqdm(doc_dict.items(), desc="Chunking docs"):
+            for idx, chunk in enumerate(chunk_text(text, max_length, stride)):
+                cid = f"{doc_id}__chunk{idx}"
+                chunk_map[cid] = doc_id
+                chunk_dict[cid] = chunk
+        
+        doc_dict = chunk_dict
 
     for in_path, out_path in zip(in_paths, out_paths):
         convert_tsv_to_json(
@@ -286,7 +293,7 @@ def build_baai_ds():
             queries,
             doc_dict,
             os.path.join(base_dir, "datasets", "dual_encoder", out_path),
-            prompt="Documento legal con el siguiente tema: "
+            prompt="",
         )
 
 

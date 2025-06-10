@@ -176,6 +176,13 @@ def compute_mean_jaccard(queries, docs):
     return total / count if count else 0.0
 
 
+# def download_msmarco_doc():
+#     import ir_datasets
+#     dataset = ir_datasets.load("msmarco-document/train")
+#     for doc in dataset.docs_iter():
+#         doc # namedtuple<doc_id, url, title, body>
+
+
 def main2():
     # Ajusta estas rutas según tu estructura
     base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
@@ -411,15 +418,15 @@ def main():
     
     # Hard-coded input filenames
     inputs = [
-        os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_inpars_train_Q1_summary_1024_baai.jsonl"),
-        os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_inpars_dev_Q1_summary_1024_baai.jsonl"),
-        os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_inpars_test_Q1_summary_1024_baai.jsonl"),
-        os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_synthetic_train_summary_1024_baai.jsonl"),
-        os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_synthetic_dev_summary_1024_baai.jsonl"),
-        os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_synthetic_test_summary_1024_baai.jsonl"),
+        os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_summary_1024_train_baai.jsonl"),
+        os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_summary_1024_dev_baai.jsonl"),
+        os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_summary_1024_test_baai.jsonl"),
+        # os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_synthetic_train_summary_1024_baai.jsonl"),
+        # os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_synthetic_dev_summary_1024_baai.jsonl"),
+        # os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_synthetic_test_summary_1024_baai.jsonl"),
     ]
     # Hard-coded output filename
-    output = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_inpars_synthetic_summary_1024_baai.jsonl")
+    output = os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bce_6x_summary_1024_baai.jsonl")
 
     merge_and_shuffle(inputs, output)
     print(f"✅ Merged {len(inputs)} files and wrote shuffled output to '{output}'")
@@ -433,4 +440,4 @@ def main():
     
 
 if __name__ == "__main__":
-    main3()
+    main()

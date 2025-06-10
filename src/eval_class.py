@@ -49,7 +49,11 @@ from src.utils.retrieval_utils import (
     evaluate_with_chunking,
     embed_qwen_chunked,
     embed_colbert,
-    embed_bge_sparse_sliding_window
+    embed_bge_sparse_sliding_window,
+    embed_qwen_sliding_window,
+    embed_bge_colbert_sliding_window,
+    embed_bge_sparse_sliding_window,
+    embed_bge_paragraph_chunking_dense,
 )
 
 from src.utils.train_utils import (
@@ -162,10 +166,11 @@ class Evaluator:
             # rel_doc_ids = qrels_dev_df["doc_id"].unique()
 
         elif self.ds in ("legal-54", "legal-inpars", "legal-synthetic"):
-            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl"))
+            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl"))
+            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_tesseract.jsonl"))
             # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_mistral_summaries_1024.jsonl"))
             # self.doc_ids, self.docs = get_legal_dataset_norm(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl"), normalize=True)
-            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_raw_google_ocr.csv"))
+            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_raw_google_ocr.jsonl"))
             # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_Gpt4o-mini_cleaned.jsonl"))
             self.doc_dict = {doc_id: doc for doc_id, doc in zip(self.doc_ids, self.docs)}
             
@@ -176,7 +181,7 @@ class Evaluator:
             elif self.ds == "legal-inpars":
                 queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "inpars_mistral-small-2501_queries.tsv")
                 self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "inpars_mistral-small-2501_qrels.tsv")
-                test_qids_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qids_inpars_test.txt")
+                test_qids_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qids_inpars_test_Q1.txt")
             elif self.ds == "legal-synthetic":
                 queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "consultas_sinteticas_380_filtered.tsv")
                 self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "qrels_synthetic_mistral-small-2501_filtered.tsv")
@@ -258,6 +263,10 @@ class Evaluator:
                 get_bge_m3_model('BAAI/bge-m3') if self.checkpoint is None else get_bge_m3_model(self.checkpoint),
                 self.doc_dict, self.query_dict, self.reuse_run
             ),
+            "bge-colbert-sliding": lambda: embed_bge_colbert_sliding_window(
+                get_bge_m3_model('BAAI/bge-m3') if self.checkpoint is None else get_bge_m3_model(self.checkpoint),
+                self.doc_dict, self.query_dict, self.reuse_run
+            ),
             "jina": lambda: embed_jina(
                 get_jinja_model().to(self.device),
                 self.docs, self.queries, self.doc_ids, self.query_ids
@@ -271,11 +280,22 @@ class Evaluator:
             "qwen": lambda: embed_qwen(
                 self.model_instance, self.tokenizer, self.docs, self.queries, self.doc_ids, self.query_ids
             ),
+            "qwen-sliding": lambda: embed_qwen_sliding_window(
+                self.model_instance, self.tokenizer, self.doc_dict, self.query_dict
+            ),
             "qwen-chunkwise": lambda: embed_qwen_chunked(self.model_instance, self.tokenizer, self.doc_dict, self.query_dict, self.doc_ids, self.query_ids),
             "bge-chunkwise": lambda: embed_chunkwise(get_bge_m3_model('BAAI/bge-m3'), get_sim_bge, self.docs, self.queries, self.doc_ids, self.query_ids, chunk_func=chunk_by_paragraphs, window_size=256),
             "exact-match": lambda: retrieve_exact_match(self.docs, self.queries, self.doc_ids, self.query_ids),
             "colbert": lambda: embed_colbert(
                 self.model_instance, self.docs, self.queries, self.doc_ids, self.query_ids
+            ),
+            "bge-sparse-sliding": lambda: embed_bge_sparse_sliding_window(
+                get_bge_m3_model('BAAI/bge-m3') if self.checkpoint is None else get_bge_m3_model(self.checkpoint),
+                self.doc_dict, self.query_dict, self.reuse_run
+            ),
+            "bge-paragraph": lambda: embed_bge_paragraph_chunking_dense(
+                get_bge_m3_model('BAAI/bge-m3') if self.checkpoint is None else get_bge_m3_model(self.checkpoint),
+                self.doc_dict, self.query_dict, self.reuse_run
             ),
         }
 
@@ -296,12 +316,12 @@ class Evaluator:
         # self.write_run_to_tsv(qid="1", out_path="run_Q1_before.tsv")
         # for each query rerank the top 100 docs
         if self.rerank_chunkwise:
-            self.run = rerank_cross_encoder_chunked(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 50, self.query_dict, self.doc_dict,
+            self.run = rerank_cross_encoder_chunked(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 100, self.query_dict, self.doc_dict,
                                                     max_length=self.max_length, stride=self.max_length//2, aggregator="top3")
         else:
             self.run = rerank_cross_encoder(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 50, self.query_dict, self.doc_dict,
                                     max_length=self.max_length)
-        self.write_run_to_tsv(qid="1", out_path="run_Q1_after.tsv")
+        # self.write_run_to_tsv(qid="1", out_path="run_Q1_after.tsv")
 
     def get_metrics(self):
         run_qids = set(self.run.keys())
@@ -414,8 +434,13 @@ def main():
 
     FastLanguageModel.for_inference(model)
 
+    print("Pad token ID and token:")
     print(tokenizer.pad_token_id)   # 128004
     print(tokenizer.pad_token)      # <|finetune_right_pad_id|>
+
+    print("EOS token ID and token:")
+    print(tokenizer.eos_token_id)
+    print(tokenizer.eos_token)
 
     # model = AutoPeftModelForCausalLM.from_pretrained(
     #     model_save_path,
@@ -437,14 +462,14 @@ def main():
     #                       limit=10_000
     #             )
     evaluator = Evaluator(
-        ds="legal-54",
-        model_name="bge",
+        ds="legal-inpars",
+        model_name="qwen-sliding",
         metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
-        # model_instance=model,
+        model_instance=model,
         # checkpoint=model_path,
         rerank=False,
         # reranker_model=model,
-        # tokenizer=tokenizer,
+        tokenizer=tokenizer,
         # max_length=512,
         # rerank_chunkwise=True,
         # reranker_model_type="binary"
@@ -470,23 +495,30 @@ if __name__ == "__main__":
     # evaluator.evaluate()
 
     # from transformers import AutoTokenizer, AutoModelForSequenceClassification
-    # # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
-    # # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1")
+    # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1_v4")
+    # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1_v4")
+    
     # # model_path = "dariolopez/bge-m3-es-legal-tmp-6"
-    # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_full_6x_chunked_self_distill_unified"
-    model_path = "/media/discoexterno/leon/legal_ir/results/legal_eos_full_synthetic/saved_model"
+    # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_6x_54_multi_epoch"
+    # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_6x_54_summary_1024"
+    # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_full_6x_summary_1024"
+    # # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_full_6x"
+    # # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_full_chunked_6x"
+    # # model_path = "/media/discoexterno/leon/legal_ir/results/legal_eos_full_synthetic/saved_model"
+    # # model_path = "/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1_v4/checkpoint-4276"
     # # model = AutoModelForSequenceClassification.from_pretrained(model_path)
     # # tokenizer = AutoTokenizer.from_pretrained(model_path)
 
     # Evaluate IR metrics.
     evaluator = Evaluator(
-        ds="legal-54",
-        model_name="qwen",
-        metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
+        ds="legal-inpars",
+        model_name="bge",
+        # metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
+        metric_names={'ndcg_cut.10', 'recall_100', 'recall_10'},
         # model_instance=model,
-        checkpoint=model_path,
+        # checkpoint=model_path,
         rerank=False,
-        # reranker_model=model,
+        # reranker_model=reranker_model,
         # tokenizer=tokenizer,
         # max_length=512,
         # rerank_chunkwise=True,
