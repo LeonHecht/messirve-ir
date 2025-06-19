@@ -166,8 +166,8 @@ class Evaluator:
             # rel_doc_ids = qrels_dev_df["doc_id"].unique()
 
         elif self.ds in ("legal-54", "legal-inpars", "legal-synthetic"):
-            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl"))
-            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_tesseract.jsonl"))
+            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl"))
+            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_tesseract.jsonl"))
             # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_mistral_summaries_1024.jsonl"))
             # self.doc_ids, self.docs = get_legal_dataset_norm(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl"), normalize=True)
             # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_raw_google_ocr.jsonl"))
@@ -511,7 +511,7 @@ if __name__ == "__main__":
 
     # Evaluate IR metrics.
     evaluator = Evaluator(
-        ds="legal-inpars",
+        ds="legal-54",
         model_name="bge",
         # metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
         metric_names={'ndcg_cut.10', 'recall_100', 'recall_10'},

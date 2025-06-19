@@ -29,9 +29,9 @@ def parse_summary(txt):
 
 
 def main():
-    dids, docs = get_legal_dataset(os.path.join(STORAGE_DIR, 'legal_ir', 'data', 'corpus', 'corpus_mistral_summaries_1024.jsonl'))
-    df = pd.DataFrame([parse_summary(doc) for doc in docs],
-                      index=dids).reset_index().rename(columns={"index": "did"})
+    dids_summary, docs_summary = get_legal_dataset(os.path.join(STORAGE_DIR, 'legal_ir', 'data', 'corpus', 'corpus_mistral_summaries_1024.jsonl'))
+    df = pd.DataFrame([parse_summary(doc) for doc in docs_summary],
+                      index=dids_summary).reset_index().rename(columns={"index": "did"})
     
     df.describe().to_csv(os.path.join(STORAGE_DIR, 'legal_ir', 'data', 'summary_analysis.csv'), index=True)
     df[headers].mean().to_csv(os.path.join(STORAGE_DIR, 'legal_ir', 'data', 'summary_analysis_mean.csv'), index=True)

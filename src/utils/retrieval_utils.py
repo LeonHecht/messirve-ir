@@ -2550,7 +2550,7 @@ def create_results_file(run):
     if len(run) > 10:
         # sort run dict by similarity
         for query_id in run:
-            run[query_id] = dict(sorted(run[query_id].items(), key=lambda x: x[1], reverse=True)[:10])
+            run[query_id] = dict(sorted(run[query_id].items(), key=lambda x: x[1], reverse=True)[:30])
         
         with open("results.txt", "w") as f:
             for query_id, doc_dict in run.items():
@@ -2561,7 +2561,7 @@ def create_results_file(run):
         out_paths = []
         for type_, type_run in run.items():
             for query_id in type_run:
-                type_run[query_id] = dict(sorted(type_run[query_id].items(), key=lambda x: x[1], reverse=True)[:10])
+                type_run[query_id] = dict(sorted(type_run[query_id].items(), key=lambda x: x[1], reverse=True)[:30])
             
             out_path = f"results_{type_}.txt"
             out_paths.append(out_path)
@@ -2598,10 +2598,10 @@ def create_predictions_file(run, run_id="my_run"):
         Writes the results to a file named "predictions.tsv".
     """
     if len(run) > 10:
-        with open("predictions.tsv", "w") as f:
+        with open("predictions_BGE-m3.tsv", "w") as f:
             for query_id, doc_scores in run.items():
                 # Sort documents by score in descending order and take top 10
-                sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:10]
+                sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:30]
                 for rank, (doc_id, score) in enumerate(sorted_docs, start=1):
                     # Write in TREC format: query_id, Q0, doc_id, rank, score, run_id
                     f.write(f"{query_id}\tQ0\t{doc_id}\t{rank}\t{score:.4f}\t{run_id}\n")
@@ -2614,7 +2614,7 @@ def create_predictions_file(run, run_id="my_run"):
             with open(f"predictions_{type_}.tsv", "w") as f:
                 for query_id, doc_scores in type_run.items():
                     # Sort documents by score in descending order and take top 10
-                    sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:10]
+                    sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:30]
                     for rank, (doc_id, score) in enumerate(sorted_docs, start=1):
                         # Write in TREC format: query_id, Q0, doc_id, rank, score, run_id
                         f.write(f"{query_id}\tQ0\t{doc_id}\t{rank}\t{score:.4f}\t{run_id}\n")
