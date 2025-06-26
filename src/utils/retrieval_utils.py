@@ -609,7 +609,7 @@ def embed_bge_paragraph_chunking_dense(model, doc_dict, query_dict, reuse_run):
             {"dense": { query_id: [(score, texto_doc, doc_id), …], … }}.
     """
     # Parámetros fijos
-    chunk_max_len = 128
+    chunk_max_len = 256
     pooling_strategy = "top_3"
     top_k = 3
 
@@ -636,7 +636,6 @@ def embed_bge_paragraph_chunking_dense(model, doc_dict, query_dict, reuse_run):
                 if para:
                     chunk_map.append((doc_id, para))
 
-    # Si no hay párrafos, fallback a embed_bge_sliding_window_dense
     if not chunk_map:
         # Si necesitas una versión sin chunking, puedes llamar a:
         # return embed_bge_sliding_window_dense(model, doc_dict, query_dict, reuse_run)

@@ -462,7 +462,7 @@ def main():
     #                       limit=10_000
     #             )
     evaluator = Evaluator(
-        ds="legal-inpars",
+        ds="legal-54",
         model_name="qwen-sliding",
         metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
         model_instance=model,
@@ -512,7 +512,7 @@ if __name__ == "__main__":
     # Evaluate IR metrics.
     evaluator = Evaluator(
         ds="legal-54",
-        model_name="bge",
+        model_name="bge-paragraph",
         # metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
         metric_names={'ndcg_cut.10', 'recall_100', 'recall_10'},
         # model_instance=model,

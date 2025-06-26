@@ -1,7 +1,7 @@
 import os
 
 # Maximum query and document lengths
-MAX_QUERY_LEN = 20
+MAX_QUERY_LEN = 48
 MAX_DOC_LEN = 4096
 
 STORAGE_DIR = os.getenv("STORAGE_DIR", "/media/discoexterno/leon")

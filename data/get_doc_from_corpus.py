@@ -33,10 +33,11 @@ def get_doc_from_corpus(docid, corpus_path):
 
 def main():
     # Define the path to the corpus
-    corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_raw_google_ocr.csv"
+    corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus.jsonl"
+    # corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_raw_google_ocr.csv"
     # corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_Gpt4o-mini_cleaned.jsonl"
     # corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_chunk_headers.jsonl"
-    # corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_mistral_summaries.jsonl"
+    # corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_mistral_summaries_1024.jsonl"
     
     # Check if the corpus file exists
     if not corpus_path.exists():
