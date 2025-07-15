@@ -1,11 +1,11 @@
-# **Train Information Retrieval (IR) models on the messIRve dataset**
+# **Train Information Retrieval (IR) models on the various IR dataset**
 
 🚀 **Fine-tuning IR models using the SentenceTransformerTrainer and custom trainers information retrieval**
 
 ---
 
 ## **📖 Project Overview**
-This project fine-tunes **transformer models** for **retrieving relevant documents** using a contrastive learning approach. It is designed for information retrieval **in the latin american spanish domain** (MessIRve dataset) with **hard negative mining**.
+This project fine-tunes **transformer models** for **retrieving relevant documents** using a contrastive learning approach. It is designed for information retrieval **in the latin american spanish domain** with **hard negative mining**.
 
 💡 **Key Features**:
 - **MultipleNegativesRankingLoss** and **Info-NCE Loss** for contrastive training.
