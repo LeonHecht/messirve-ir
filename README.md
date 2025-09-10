@@ -1,6 +1,6 @@
-# **Train Information Retrieval (IR) models on the various IR dataset**
+# **Train Information Retrieval (IR) models on various IR datasets**
 
-🚀 **Fine-tuning IR models using the SentenceTransformerTrainer and custom trainers information retrieval**
+🚀 **Fine-tuning IR models using the SentenceTransformerTrainer and custom trainers for information retrieval**
 
 ---
 
