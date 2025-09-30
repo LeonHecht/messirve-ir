@@ -11,6 +11,18 @@ import sys
 print(f"Executable: {sys.executable}")
 from typing import List, Dict, Set
 
+import subprocess
+from typing import List, Set, Tuple, Dict
+
+JAVA_HOME = os.path.expanduser("~/.jdks/jdk-21.0.5+11")
+os.environ["JAVA_HOME"] = JAVA_HOME
+os.environ["JVM_PATH"] = os.path.join(JAVA_HOME, "lib", "server", "libjvm.so")
+os.environ["LD_LIBRARY_PATH"] = os.path.join(JAVA_HOME, "lib", "server") + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+os.environ["PATH"] = os.path.join(JAVA_HOME, "bin") + ":" + os.environ.get("PATH", "")
+
+from pyserini.search.lucene import LuceneSearcher  # pip install pyserini
+
+
 def configure_python_path():
     project_root = os.path.abspath(
         os.path.join(os.path.dirname(__file__), os.pardir)
@@ -29,6 +41,279 @@ from src.utils.retrieval_utils import get_legal_dataset, get_legal_queries
 def load_qids(path):
     df = pd.read_csv(path, header=None, usecols=[0], dtype={0: str})
     return set(df[0].tolist())
+
+
+def inspect_bm25_hits(index_dir: str, query: str, k: int = 10, language: str = "es"):
+    """
+    Utility to print the top-k BM25 hits for a query, to sanity check indexing and retrieval.
+
+    Args:
+        index_dir (str): Path to the Pyserini Lucene index.
+        query (str): Query string (in Spanish in your case).
+        k (int): Number of top documents to show (default=10).
+        language (str): Analyzer language to use (default="es").
+    """
+    from pyserini.search.lucene import LuceneSearcher
+
+    searcher = LuceneSearcher(index_dir)
+    # if language:
+    #     searcher.set_language(language)
+    # Optionally configure BM25 params
+    searcher.set_bm25(k1=0.9, b=0.4)
+
+    hits = searcher.search(query, k)
+    print(f"\n🔎 Query: {query}")
+    print(f"Top-{k} BM25 hits:")
+    for i, h in enumerate(hits, 1):
+        print(f"{i:2d}. {h.docid}\tScore={h.score:.4f}")
+        # If you want to peek into the raw text:
+        # raw = searcher.doc(h.docid).raw
+        # print(raw[:200], "...")
+
+
+def _ensure_pyserini_index_from_json(
+    corpus_path: str,
+    index_dir: str,
+    tmp_dir: str,
+    threads: int = 8,
+    rebuild: bool = False,
+) -> None:
+    import json, os, subprocess
+    from pathlib import Path
+
+    index_dir = str(index_dir)
+    if os.path.isdir(index_dir) and not rebuild and any(Path(index_dir).glob("**/segments_*")):
+        return
+
+    Path(index_dir).mkdir(parents=True, exist_ok=True)
+    tmp_in = Path(tmp_dir)
+    tmp_in.mkdir(parents=True, exist_ok=True)
+    jsonl_path = tmp_in / "docs.jsonl"
+
+    doc_ids, docs = get_legal_dataset(corpus_path)
+
+    # write Pyserini-friendly JSONL
+    with open(jsonl_path, "w", encoding="utf-8") as f_out:
+        for did, text in zip(doc_ids, docs):
+            rec = {"id": str(did), "contents": text if text is not None else ""}
+            f_out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+    # build Lucene index
+    cmd = [
+        "python", "-m", "pyserini.index.lucene",
+        "--collection", "JsonCollection",
+        "--input", str(tmp_in),
+        "--index", index_dir,
+        "--generator", "DefaultLuceneDocumentGenerator",
+        "--threads", str(threads),
+        "--storePositions", "--storeDocvectors", "--storeRaw",
+        "--language", "es",
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def _load_qrels(qrels_path: str, pos_labels: List[int], neg_labels: List[int]) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+    df_q = pd.read_csv(qrels_path, sep="\t", header=None, names=["qid", "run", "doc_id", "label"])
+    df_q["qid"] = df_q["qid"].astype(str)
+    df_q["doc_id"] = df_q["doc_id"].astype(str)
+    positives = df_q[df_q.label.isin(pos_labels)].groupby("qid")["doc_id"].apply(list).to_dict()
+    annotated_negs = df_q[df_q.label.isin(neg_labels)].groupby("qid")["doc_id"].apply(list).to_dict()
+    return positives, annotated_negs
+
+
+def _load_queries(queries_path: str) -> Dict[str, str]:
+    df = pd.read_csv(queries_path, sep="\t")
+    # expects columns ['id', 'query']
+    df["id"] = df["id"].astype(str)
+    return dict(zip(df["id"], df["query"]))
+
+
+def build_ce_dataset_fast(
+    qrels_path: str,
+    pos_labels: List[int],
+    neg_labels: List[int],
+    corpus_path: str,
+    queries_path: str,
+    output_path: str,
+    qid_filter: Set[str] | None = None,
+    neg_ratio: int = 12,
+    med_cap: int = 3,
+    med_offset: int = 10,
+    med_top_k: int = 150,
+    seed: int = 42,
+    # Pyserini-specific
+    index_dir: str = "indexes/legal_bm25",
+    tmp_dir: str = "tmp/pyserini_jsonl",
+    rebuild_index: bool = False,
+    bm25_k1: float = 0.9,
+    bm25_b: float = 0.4,
+    threads: int = 8,
+    easy_mode: str = "no_terms",  # 'no_terms' (attempt Lucene -*), or 'random'
+) -> pd.DataFrame:
+    """
+    Drop-in faster version backed by Pyserini (Lucene).
+    - Builds (or reuses) a Lucene index for the corpus.
+    - Uses LuceneSearcher for BM25 top-k retrieval to get 'medium' negatives.
+    - 'easy' negatives: either sample docs that match *:* but NOT any query term,
+      or fall back to random sampling if the parser path isn't available.
+
+    Notes:
+      * Index build follows Pyserini's JsonCollection + DefaultLuceneDocumentGenerator pattern. :contentReference[oaicite:2]{index=2}
+      * Retrieval uses LuceneSearcher.set_bm25() and .search(). :contentReference[oaicite:3]{index=3}
+    """
+    random.seed(seed)
+
+    doc_ids, docs = get_legal_dataset(corpus_path)
+    doc_dict = {did: doc for did, doc in zip(doc_ids, docs)}
+
+    # 0) Load supervision and queries
+    positives, annotated_negs = _load_qrels(qrels_path, pos_labels, neg_labels)
+    query_dict = _load_queries(queries_path)
+    if qid_filter:
+        query_dict = {qid: q for qid, q in query_dict.items() if qid in qid_filter}
+
+    # 1) Ensure Lucene index
+    _ensure_pyserini_index_from_json(
+        corpus_path=corpus_path,
+        index_dir=index_dir,
+        tmp_dir=tmp_dir,
+        threads=threads,
+        rebuild=rebuild_index,
+    )
+
+    # 2) Open searcher
+    searcher = LuceneSearcher(index_dir)
+    searcher.set_language("es")
+    searcher.set_bm25(bm25_k1, bm25_b)  # typical defaults; adjust if desired. :contentReference[oaicite:4]{index=4}
+
+    # Build a universe of all docids quickly from index (iterate once)
+    # Pyserini exposes raw stored docs via searcher.doc(docid).docid lookup is int->ext id via internal mappings;
+    # we'll get ext ids from a *:* query as a simple method.
+    # To avoid pulling millions, we lazily collect as we see hits + fallbacks.
+    all_docs_cache: Set[str] = set()
+
+    def _gather_docids_from_hits(hits):
+        ids = [h.docid for h in hits]
+        all_docs_cache.update(ids)
+        return ids
+
+    # Helper: get top hits for a text query
+    def _top_docids(q: str, k: int) -> List[str]:
+        if k <= 0:
+            return []
+        hits = searcher.search(q, k)
+        return _gather_docids_from_hits(hits)
+
+    # Helper: sample random docids (fallback). We approximate the universe by
+    # first issuing a broad query if cache is small.
+    def _random_docids(exclude: Set[str], k: int) -> List[str]:
+        if k <= 0:
+            return []
+        need = k
+        while len(all_docs_cache) < max(10000, k * 5):
+            # Expand cache by pulling more docs from a broad query
+            more = _top_docids("*:*", 20000 - len(all_docs_cache))  # MatchAllDocsQuery via Lucene syntax. :contentReference[oaicite:5]{index=5}
+            if not more:
+                break
+        pool = list(all_docs_cache.difference(exclude))
+        if not pool:
+            # last resort: pull some hits and retry
+            pool = _top_docids("*:*", max(10000, k * 5))
+            pool = list(set(pool).difference(exclude))
+        take = min(need, len(pool))
+        return random.sample(pool, take) if take > 0 else []
+
+    rows = []
+    n_annotated = n_medium = n_easy = 0
+    total_pos = 0
+
+    for qid, q_text in tqdm(query_dict.items(), desc="Processing queries (Pyserini)"):
+        pos_list = positives.get(qid, [])
+        if not pos_list:
+            continue
+        pos_set = set(pos_list)
+        total_pos += len(pos_list)
+
+        # total negatives desired
+        desired_neg = neg_ratio * len(pos_list)
+        if desired_neg == 0:
+            desired_neg = len(annotated_negs.get(qid, []))
+
+        # hard (annotated)
+        hard_pool = annotated_negs.get(qid, [])
+        if len(hard_pool) >= desired_neg:
+            hard_used = random.sample(hard_pool, desired_neg)
+            med_used, easy_used = [], []
+        else:
+            hard_used = list(hard_pool)
+            rem = desired_neg - len(hard_used)
+
+            # MEDIUM via BM25 top-k with offset
+            K = med_offset + med_top_k + 50  # small cushion
+            top_docids = _top_docids(q_text, K)
+            med_candidates = [
+                d for d in top_docids[med_offset: med_offset + med_top_k]
+                if d not in pos_set and d not in hard_used
+            ]
+            m_needed = min(med_cap * len(pos_list), rem)
+            med_used = med_candidates[:m_needed]
+            rem -= len(med_used)
+
+            # EASY: docs that avoid query terms (if possible), else random
+            easy_used = []
+            if rem > 0:
+                if easy_mode == "no_terms":
+                    # Try Lucene query parser: "*:* -t1 -t2 ..."
+                    # Lucene QueryParser supports NOT via '-' and match-all via '*:*'. :contentReference[oaicite:6]{index=6}
+                    q_terms = [t for t in q_text.lower().split() if len(t) > 3]
+                    if q_terms:
+                        try:
+                            # sample randomly from doc_dict
+                            # to get a random sample of candidate docs for the easy negatives
+                            # that will then be filtered to not include any query terms
+                            cand = random.sample(doc_ids, rem*100)
+
+                            # filter out overlaps
+                            cand = [
+                                d for d in cand
+                                if d not in pos_set and d not in hard_used and d not in med_used
+                                and all(t not in doc_dict[d].lower() for t in q_terms)
+                            ]
+                            if len(cand) == 0:
+                                print("Warning: Did not find any easy candidates.")
+                            take = min(rem, len(cand))
+                            easy_used = random.sample(cand, take) if take > 0 else []
+                            rem -= len(easy_used)
+                        except Exception:
+                            # Fall back to random if the query parser route is unavailable
+                            pass
+
+                if rem > 0:
+                    exclude = pos_set.union(hard_used).union(med_used).union(set(easy_used))
+                    extra = _random_docids(exclude, rem)
+                    easy_used.extend(extra)
+                    rem -= len(extra)
+                    if rem > 0:
+                        print(f"[WARN] qid {qid}: short {rem} negatives after fallback")
+
+        # bookkeeping
+        n_annotated += len(hard_used)
+        n_medium += len(med_used)
+        n_easy += len(easy_used)
+
+        # write rows
+        rows.extend((qid, d, 1) for d in pos_list)
+        rows.extend((qid, d, 0) for d in (hard_used + med_used + easy_used))
+
+    df_out = pd.DataFrame(rows, columns=["qid", "doc_id", "label"])
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    df_out.to_csv(output_path, sep="\t", index=False)
+
+    print(f"[✓] Written {len(df_out)} rows to {output_path}")
+    print(f"Negatives breakdown: annotated={n_annotated}, medium={n_medium}, easy={n_easy}")
+    print(f"Total positives={total_pos}")
+    return df_out
+
 
 
 def chunk_text(
@@ -449,66 +734,24 @@ def main_create_scenario_datasets():
       S4: query‑wise split, annotated + extras at 2× and 3×
     """
     base = Path(STORAGE_DIR) / "legal_ir" / "data"
-    ann  = base / "annotations" / "qrels_54.tsv"
+    # ann  = base / "annotations" / "qrels_54.tsv"
+    ann  = base / "annotations" / "mistral_inpars_v2_corpus_NEW_qrels_dedup.tsv"
     # ann  = base / "annotations" / "inpars_mistral-small-2501_qrels_Q1.tsv"
     # corp = base / "corpus" / "corpus.jsonl"
-    corp = base / "corpus" / "corpus_mistral_summaries_1024.jsonl"
-    qry  = base / "corpus" / "queries_54.tsv"
-    out  = base / "datasets" / "cross_encoder"
+    corp = base / "corpus" / "corpus_NEW.jsonl"
+    # qry  = base / "corpus" / "queries_54.tsv"
+    qry  = base / "corpus" / "mistral_inpars_v2_corpus_NEW_queries_dedup.tsv"
+    out  = base / "datasets" / "dual_encoder"
     out.mkdir(parents=True, exist_ok=True)
 
     seed = 42
-    # # --- S1 & S2: random (basic) split ---
-    # for scenario, neg_ratio in [("S1", 0), ("S2", 6)]:
-    #     # 1) build full dataset
-    #     df_full = build_ce_dataset(
-    #         qrels_path=str(ann),
-    #         corpus_path=str(corp),
-    #         queries_path=str(qry),
-    #         output_path=str(out / f"bce_{scenario}_full.tsv"),
-    #         qid_filter=None,
-    #         neg_ratio=neg_ratio,
-    #         seed=seed
-    #     )
-
-    #     # 2) random train/dev/test split 70/15/15
-    #     # Note: this is a random split, not query-wise
-    #     df_train, df_temp = train_test_split(df_full, test_size=0.3, random_state=seed, shuffle=True)
-    #     df_dev, df_test = train_test_split(df_temp, test_size=0.5, random_state=seed, shuffle=True)
-
-    #     # 3) save splits
-    #     df_train.to_csv(out / f"bce_{scenario}_train.tsv", sep="\t", index=False)
-    #     df_dev.  to_csv(out / f"bce_{scenario}_dev.tsv",   sep="\t", index=False)
-    #     df_test.to_csv(out / f"bce_{scenario}_test.tsv",  sep="\t", index=False)
-
-    # # --- S3: query‑wise split, only annotated negatives ---
-    # for split_name, qids in [("train", train_qids), ("dev", dev_qids), ("test", test_qids)]:
-    #     build_ce_dataset(
-    #         qrels_path=str(ann),
-    #         corpus_path=str(corp),
-    #         queries_path=str(qry),
-    #         output_path=str(out / f"bce_S3_{split_name}.tsv"),
-    #         qid_filter=qids,
-    #         neg_ratio=0,
-    #         seed=seed
-    #     )
-
-    # # --- S4: query‑wise split + extras at 2× and 3× ---
-    # for ratio in (2, 3):
-    #     for split_name, qids in [("train", train_qids), ("dev", dev_qids), ("test", test_qids)]:
-    #         build_ce_dataset(
-    #             qrels_path=str(ann),
-    #             corpus_path=str(corp),
-    #             queries_path=str(qry),
-    #             output_path=str(out / f"bce_S4_r{ratio}_{split_name}.tsv"),
-    #             qid_filter=qids,
-    #             neg_ratio=ratio,
-    #             seed=seed
-    #         )
     
-    train_qids = load_qids(base / "qids_train.txt")
-    dev_qids   = load_qids(base / "qids_dev.txt")
-    test_qids  = load_qids(base / "qids_test.txt")
+    # train_qids = load_qids(base / "qids_train.txt")
+    # dev_qids   = load_qids(base / "qids_dev.txt")
+    # test_qids  = load_qids(base / "qids_test.txt")
+    train_qids = load_qids(base / "qids_inpars_v2_dedup_train.txt")
+    dev_qids   = load_qids(base / "qids_inpars_v2_dedup_dev.txt")
+    test_qids  = load_qids(base / "qids_inpars_v2_dedup_test.txt")
     for split_name, qids in [("train", train_qids), ("dev", dev_qids), ("test", test_qids)]:
         # build_ce_dataset(
         #     qrels_path=str(ann),
@@ -521,15 +764,28 @@ def main_create_scenario_datasets():
         #     neg_ratio=6,
         #     seed=seed
         # )
-        build_ce_dataset(
+        # build_ce_dataset(
+        #     qrels_path=str(ann),
+        #     pos_labels=[1],
+        #     neg_labels=[0],
+        #     corpus_path=str(corp),
+        #     queries_path=str(qry),
+        #     output_path=str(out / f"bge_finetune_6x_inpars_v2_corta_{split_name}.tsv"),
+        #     qid_filter=qids,
+        #     neg_ratio=6,
+        #     seed=seed,
+        #     # max_length=512,
+        #     # stride=256,
+        # )
+        build_ce_dataset_fast(
             qrels_path=str(ann),
             pos_labels=[1],
             neg_labels=[0],
             corpus_path=str(corp),
             queries_path=str(qry),
-            output_path=str(out / f"bce_6x_summary_1024_{split_name}.tsv"),
+            output_path=str(out / f"bge_finetune_12x_inpars_v2_dedup_{split_name}.tsv"),
             qid_filter=qids,
-            neg_ratio=6,
+            neg_ratio=12,
             seed=seed,
             # max_length=512,
             # stride=256,
@@ -537,3 +793,5 @@ def main_create_scenario_datasets():
 
 if __name__ == "__main__":
     main_create_scenario_datasets()
+    # inspect_bm25_hits("indexes/legal_bm25", "acción de inconstitucionalidad ley 1626", k=10)
+

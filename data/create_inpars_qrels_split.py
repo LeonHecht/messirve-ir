@@ -16,7 +16,6 @@ def configure_python_path():
 configure_python_path()
 
 from config.config import STORAGE_DIR
-from src.utils.retrieval_utils import get_legal_queries
 
 
 def split_qrels(split: str):

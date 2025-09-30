@@ -1,5 +1,5 @@
 import os
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple, Union
 import numpy as np
 from tqdm import tqdm
 import torch
@@ -329,13 +329,13 @@ def embed_jina(model, docs, queries, doc_ids, query_ids):
     # Alternatively, you can choose not to pass a `task`, and no specific LoRA adapter will be used.
     print("Encoding queries...", end="")
     embeddings_queries = batch_encode_jina(
-        model, queries, batch_size=4, task="retrieval.query", max_length=MAX_QUERY_LEN
+        model, queries, batch_size=32, task="retrieval.query", max_length=MAX_QUERY_LEN
     )
     print("Done.")
 
     print("Encoding docs...", end="")
     embeddings_docs = batch_encode_jina(
-        model, docs, batch_size=4, task="retrieval.passage", max_length=MAX_DOC_LEN
+        model, docs, batch_size=32, task="retrieval.passage", max_length=MAX_DOC_LEN
     )
     print("Done.")
 
@@ -403,15 +403,19 @@ def embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run):
     """
     embeddings_queries = model.encode(queries, batch_size=8, max_length=MAX_QUERY_LEN)['dense_vecs']
     # Embed entire corpus if file does not exist
-    path = os.path.join(STORAGE_DIR, 'legal_ir/data/corpus/embeddings/bge-m3_corpus_inpars.npy')
+    path = os.path.join(STORAGE_DIR, 'legal_ir/data/corpus/embeddings/bge-m3_corpus_NEW.npy')
     if not os.path.exists(path) or not reuse_run:
         print("Embedding docs...", end="")
-        embeddings_docs = model.encode(docs, batch_size=8, max_length=MAX_DOC_LEN)['dense_vecs']
+        embeddings_docs = model.encode(docs, batch_size=64, max_length=MAX_DOC_LEN)['dense_vecs']
         print("Done.")
-        # # save embeddings
-        # print("Saving embeddings...", end="")
-        # np.save(path, embeddings_docs)
-        # print("Done.")
+        
+        try:
+            # save embeddings
+            print("Saving embeddings...", end="")
+            np.save(path, embeddings_docs)
+            print("Done.")
+        except:
+            print("Could not save embeddings.")
     else:
         # Load embeddings
         embeddings_docs = np.load(path)
@@ -729,7 +733,7 @@ def compute_sparse_similarity(model, q_lex_list, d_lex_list):
     """
     num_q, num_d = len(q_lex_list), len(d_lex_list)
     sim = torch.zeros(num_q, num_d, dtype=torch.float32)
-    print("Computing sparse similarity...", end="")
+    print("Computing sparse similarity...")
     for i, qw in tqdm(enumerate(q_lex_list)):
         for j, dw in enumerate(d_lex_list):
             sim[i, j] = float(model.compute_lexical_matching_score(qw, dw))
@@ -784,7 +788,854 @@ def rrf(sim: torch.Tensor, k: int = 60) -> torch.Tensor:
     return 1.0 / (k + ranks.float())
 
 
-def embed_bge_sparse(model, docs, queries, doc_ids, query_ids, reuse_run):
+import gc
+import heapq
+from typing import Dict, List, Tuple, Iterable
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+# ---------- helpers ----------
+
+def _iterate_shards(texts: List[str], ids: List, shard_size: int) -> Iterable[Tuple[List, List[str]]]:
+    for i in range(0, len(texts), shard_size):
+        yield ids[i:i+shard_size], texts[i:i+shard_size]
+
+class _RunningStats:
+    """Welford running mean/std AND min/max per query for a modality."""
+    def __init__(self, n_queries: int):
+        self.n = np.zeros(n_queries, dtype=np.int64)
+        self.mean = np.zeros(n_queries, dtype=np.float64)
+        self.M2 = np.zeros(n_queries, dtype=np.float64)
+        self.minv = np.full(n_queries, np.inf, dtype=np.float64)
+        self.maxv = np.full(n_queries, -np.inf, dtype=np.float64)
+
+    def update_from_block(self, sims_block: np.ndarray):
+        # sims_block shape: (nq, m_shard)
+        # Update min/max
+        block_min = sims_block.min(axis=1)
+        block_max = sims_block.max(axis=1)
+        self.minv = np.minimum(self.minv, block_min)
+        self.maxv = np.maximum(self.maxv, block_max)
+        # Welford for mean/std
+        # Process each query row to be memory-safe
+        nq = sims_block.shape[0]
+        for qi in range(nq):
+            x = sims_block[qi].astype(np.float64, copy=False)
+            k = x.size
+            if k == 0:
+                continue
+            n0 = self.n[qi]
+            mean0 = self.mean[qi]
+            # batch update:
+            mean_block = x.mean()
+            # delta between block mean and running mean
+            delta = mean_block - mean0
+            self.mean[qi] = mean0 + delta * (k / (n0 + k))
+            # Update M2: sum of squared diffs
+            # M2 += within-block variance + between means
+            m2_block = ((x - mean_block) ** 2).sum()
+            self.M2[qi] += m2_block + (delta**2) * (n0 * k) / (n0 + k) if (n0 + k) > 0 else m2_block
+            self.n[qi] = n0 + k
+
+    def finalize_std(self) -> np.ndarray:
+        # Population std (use ddof=0); if you prefer sample std, use ddof=1 where n>1
+        with np.errstate(invalid='ignore', divide='ignore'):
+            var = self.M2 / np.maximum(self.n, 1)
+            std = np.sqrt(var)
+        # guard against zeros
+        std[std == 0] = 1.0
+        return std
+
+def _normalize_block(sims_block: np.ndarray, norm: str,
+                     mean: np.ndarray = None, std: np.ndarray = None,
+                     minv: np.ndarray = None, maxv: np.ndarray = None) -> np.ndarray:
+    if norm == "raw":
+        return sims_block
+    elif norm == "z":
+        # (s - mean)/std per row
+        # Broadcasting: (nq,1)
+        return (sims_block - mean[:, None]) / std[:, None]
+    elif norm == "minmax":
+        denom = (maxv - minv)
+        denom[denom == 0] = 1.0
+        return (sims_block - minv[:, None]) / denom[:, None]
+    else:
+        raise ValueError(f"Unsupported NORM '{norm}'")
+
+
+def _heap_pushk(heaps_per_q: Dict[str, list], qids: List[str],
+                sims_block: torch.Tensor, doc_ids_block: List, texts_block: List[str], k: int):
+    # sims_block: (nq, m) torch.float32 (on CPU)
+    nq, m = sims_block.shape
+    sims_np = sims_block.cpu().numpy()
+    for qi in range(nq):
+        qid = qids[qi]
+        h = heaps_per_q[qid]
+        row = sims_np[qi]
+        for j in range(m):
+            # max-heap via score, store (score, text, doc_id)
+            heapq.heappush(h, (float(row[j]), texts_block[j], doc_ids_block[j]))
+            if len(h) > k:
+                heapq.heappop(h)
+
+def _heap_to_sorted_list(h: list) -> List[Tuple[float, str, str]]:
+    # sort descending by score
+    return sorted(h, key=lambda x: x[0], reverse=True)
+
+def _prepare_docs_order(docs: Dict, doc_ids: List):
+    return [docs[d] for d in doc_ids]
+
+# ---------- modality passes (streamed) ----------
+
+@torch.no_grad()
+def run_dense_streamed(
+    model,
+    docs: Dict,                 # {doc_id: text}
+    doc_ids: List,
+    queries: List[str],
+    query_ids: List[str],
+    MAX_QUERY_LEN: int = 64,
+    MAX_DOC_LEN: int = 512,
+    SHARD_SIZE: int = 1500,
+    DOC_BATCH: int = 8,
+    TOPK: int = 200,
+    DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu",
+) -> Dict[str, List[Tuple[float, str, str]]]:
+    """Return: {qid: [(score, text, doc_id), ...]} for dense."""
+    if hasattr(model, "eval"):
+        model.eval()
+
+    print(f"[dense] Encoding {len(queries)} queries...")
+
+    # Encode queries (dense)
+    q_out = model.encode(
+        queries,
+        batch_size=2,
+        max_length=MAX_QUERY_LEN,
+        return_dense=True,
+        return_sparse=False,
+        return_colbert_vecs=False,
+    )
+    q_dense = torch.tensor(q_out["dense_vecs"], dtype=torch.float32, device=DEVICE)
+    q_dense = F.normalize(q_dense, p=2, dim=1)  # cosine via dot
+
+    heaps = {qid: [] for qid in query_ids}
+    doc_texts = _prepare_docs_order(docs, doc_ids)
+
+    print(f"[dense] Processing {len(doc_ids)} docs in shards of {SHARD_SIZE}...")
+
+    total_iters = len(doc_ids) // SHARD_SIZE + (1 if len(doc_ids) % SHARD_SIZE != 0 else 0)
+    current_iter = 0
+
+    for ids_blk, txt_blk in _iterate_shards(doc_texts, doc_ids, SHARD_SIZE):
+        print(f"[dense] Processing shard {current_iter+1}/{total_iters}...")
+        d_out = model.encode(
+            txt_blk,
+            batch_size=DOC_BATCH,
+            max_length=MAX_DOC_LEN,
+            return_dense=True,
+            return_sparse=False,
+            return_colbert_vecs=False,
+        )
+        d_dense = torch.tensor(d_out["dense_vecs"], dtype=torch.float32, device=DEVICE)
+        d_dense = F.normalize(d_dense, p=2, dim=1)
+        sims = (q_dense @ d_dense.T).detach().cpu()  # (nq, m)
+        _heap_pushk(heaps, query_ids, sims, ids_blk, txt_blk, TOPK)
+
+        del d_out, d_dense, sims
+        gc.collect()
+        if DEVICE.startswith("cuda"): torch.cuda.empty_cache()
+        current_iter += 1
+
+    print(f"[dense] Done. Collected top-{TOPK} for {len(query_ids)} queries.")
+    return {qid: _heap_to_sorted_list(h) for qid, h in heaps.items()}
+
+@torch.no_grad()
+def run_sparse_streamed(
+    model,
+    docs: Dict,
+    doc_ids: List,
+    queries: List[str],
+    query_ids: List[str],
+    MAX_QUERY_LEN: int = 64,
+    MAX_DOC_LEN: int = 512,
+    SHARD_SIZE: int = 1500,
+    DOC_BATCH: int = 8,
+    TOPK: int = 200,
+) -> Dict[str, List[Tuple[float, str, str]]]:
+    """Return: {qid: [(score, text, doc_id), ...]} for sparse (lexical). CPU-bound."""
+    if hasattr(model, "eval"):
+        model.eval()
+
+    print(f"[sparse] Encoding {len(queries)} queries...")
+
+    # Queries sparse
+    q_out = model.encode(
+        queries,
+        batch_size=2,
+        max_length=MAX_QUERY_LEN,
+        return_dense=False,
+        return_sparse=True,
+        return_colbert_vecs=False,
+    )
+    q_lex = q_out["lexical_weights"]
+
+    heaps = {qid: [] for qid in query_ids}
+    doc_texts = _prepare_docs_order(docs, doc_ids)
+
+    print(f"[sparse] Processing {len(doc_ids)} docs in shards of {SHARD_SIZE}...")
+
+    total_iters = len(doc_ids) // SHARD_SIZE + (1 if len(doc_ids) % SHARD_SIZE != 0 else 0)
+    current_iter = 0
+
+    for ids_blk, txt_blk in _iterate_shards(doc_texts, doc_ids, SHARD_SIZE):
+        print(f"[sparse] Processing shard {current_iter+1}/{total_iters}...")
+        d_out = model.encode(
+            txt_blk,
+            batch_size=DOC_BATCH,
+            max_length=MAX_DOC_LEN,
+            return_dense=False,
+            return_sparse=True,
+            return_colbert_vecs=False,
+        )
+        sims = compute_sparse_similarity(model, q_lex, d_out["lexical_weights"])  # torch.Tensor (nq, m)
+        _heap_pushk(heaps, query_ids, sims, ids_blk, txt_blk, TOPK)
+
+        del d_out, sims
+        gc.collect()
+        current_iter += 1
+
+    print(f"[sparse] Done. Collected top-{TOPK} for {len(query_ids)} queries.")
+    return {qid: _heap_to_sorted_list(h) for qid, h in heaps.items()}
+
+@torch.no_grad()
+def run_colbert_streamed(
+    model,
+    docs: Dict,
+    doc_ids: List,
+    queries: List[str],
+    query_ids: List[str],
+    MAX_QUERY_LEN: int = 64,
+    MAX_DOC_LEN: int = 256,     # keep shorter for ColBERT for speed/memory
+    SHARD_SIZE: int = 800,      # smaller shards — ColBERT is heavy
+    DOC_BATCH: int = 2,         # small batches
+    TOPK: int = 200,
+) -> Dict[str, List[Tuple[float, str, str]]]:
+    """Return: {qid: [(score, text, doc_id), ...]} for ColBERT."""
+    if hasattr(model, "eval"):
+        model.eval()
+
+    print(f"[colbert] Encoding {len(queries)} queries...")
+
+    # Queries colbert
+    q_out = model.encode(
+        queries,
+        batch_size=2,
+        max_length=MAX_QUERY_LEN,
+        return_dense=False,
+        return_sparse=False,
+        return_colbert_vecs=True,
+    )
+    q_col = q_out["colbert_vecs"]
+
+    heaps = {qid: [] for qid in query_ids}
+    doc_texts = _prepare_docs_order(docs, doc_ids)
+
+    print(f"[colbert] Processing {len(doc_ids)} docs in shards of {SHARD_SIZE}...")
+
+    total_iters = len(doc_ids) // SHARD_SIZE + (1 if len(doc_ids) % SHARD_SIZE != 0 else 0)
+    current_iter = 0
+
+    for ids_blk, txt_blk in _iterate_shards(doc_texts, doc_ids, SHARD_SIZE):
+        print(f"[colbert] Processing shard {current_iter+1}/{total_iters}...")
+        d_out = model.encode(
+            txt_blk,
+            batch_size=DOC_BATCH,
+            max_length=MAX_DOC_LEN,
+            return_dense=False,
+            return_sparse=False,
+            return_colbert_vecs=True,
+        )
+        sims = compute_colbert_similarity(q_col, d_out["colbert_vecs"], model)  # torch.Tensor (nq, m)
+        _heap_pushk(heaps, query_ids, sims, ids_blk, txt_blk, TOPK)
+
+        del d_out, sims
+        gc.collect()
+
+        current_iter += 1
+
+    print(f"[colbert] Done. Collected top-{TOPK} for {len(query_ids)} queries.")
+    return {qid: _heap_to_sorted_list(h) for qid, h in heaps.items()}
+
+# ---------- fusion over union candidate set ----------
+
+def _scores_to_tensor(run_q: List[Tuple[float, str, str]], id_to_idx: Dict[str, int], m: int) -> torch.Tensor:
+    """Pack a run's scores for one query into a dense vector aligned to candidate list order."""
+    v = torch.full((m,), float("-inf"), dtype=torch.float32)
+    for score, _txt, doc_id in run_q:
+        j = id_to_idx.get(doc_id)
+        if j is not None:
+            v[j] = float(score)
+    return v
+
+def _norm_row(vec: torch.Tensor, method: str) -> torch.Tensor:
+    if method == "raw":
+        return vec
+    elif method == "z":
+        # treat -inf as missing → mask out for stats
+        mask = torch.isfinite(vec)
+        if mask.any():
+            x = vec[mask]
+            mu = x.mean()
+            sigma = x.std(unbiased=False)
+            if sigma == 0: sigma = 1.0
+            out = vec.clone()
+            out[mask] = (x - mu) / sigma
+            out[~mask] = float("-inf")
+            return out
+        return vec
+    elif method == "minmax":
+        mask = torch.isfinite(vec)
+        if mask.any():
+            x = vec[mask]
+            mn, mx = x.min(), x.max()
+            denom = (mx - mn) if (mx > mn) else 1.0
+            out = vec.clone()
+            out[mask] = (x - mn) / denom
+            out[~mask] = float("-inf")
+            return out
+        return vec
+    else:
+        raise ValueError(f"Unknown norm method: {method}")
+
+def _rrf_from_scores(vec: torch.Tensor, k: int = 60) -> torch.Tensor:
+    # Convert scores to ranks on finite entries only
+    mask = torch.isfinite(vec)
+    ranks = torch.full_like(vec, fill_value=float("inf"))
+    if mask.any():
+        # argsort descending -> ranks
+        order = torch.argsort(vec[mask], descending=True)
+        inv = torch.empty_like(order)
+        inv[order] = torch.arange(order.numel(), device=order.device)
+        ranks_masked = inv + 1  # 1-based
+        ranks[mask] = ranks_masked.float()
+    # RRF score; missing → 0
+    out = torch.zeros_like(vec)
+    finite = torch.isfinite(ranks)
+    out[finite] = 1.0 / (k + ranks[finite])
+    return out
+
+
+def fuse_runs(
+    query_ids: List[str],
+    dense_run: Dict[str, List[Tuple[float, str, str]]] = None,
+    sparse_run: Dict[str, List[Tuple[float, str, str]]] = None,
+    colbert_run: Dict[str, List[Tuple[float, str, str]]] = None,
+    norm: str = "z",     # "raw" | "z" | "minmax" | "rrf"
+    alpha: float = 1.0,  # weight for dense
+    beta: float = 1.0,   # weight for sparse
+    gamma: float = 1.0,  # weight for colbert
+    TOPK: int = 100,
+    pytrec_ready: bool = True,
+) -> Dict[str, Dict[str, Union[List[Tuple[float, str, str]], Dict[str, float]]]]:
+    """
+    If pytrec_ready=False (default):
+        returns 7 variants with the usual structure:
+          {variant: {qid: [(score, text, doc_id), ...]}}
+    If pytrec_ready=True:
+        returns 7 variants in pytrec format:
+          {variant: {qid: {doc_id: score, ...}}}
+    """
+
+    import numpy as np
+    import torch
+
+    runs_out = {
+        "dense": {}, "sparse": {}, "colbert": {},
+        "dense_sparse": {}, "dense_colbert": {}, "sparse_colbert": {}, "all_three": {}
+    }
+
+    def topk_from_vec(vec, cand, did_to_text):
+        idx = torch.argsort(vec, descending=True)
+        out = []
+        for j in idx[:TOPK]:
+            j = int(j)
+            sc = float(vec[j])
+            if not np.isfinite(sc):
+                continue
+            did = cand[j]
+            out.append((sc, did_to_text.get(did, ""), did))
+        return out
+
+    def list_to_pytrec(items):
+        # items: [(score, text, doc_id), ...]
+        d = {}
+        for sc, _tx, did in items:
+            sc = float(sc)
+            if np.isfinite(sc):
+                d[str(did)] = sc
+        return d
+
+    for qid in query_ids:
+        d_list = dense_run.get(qid, []) if dense_run else []
+        s_list = sparse_run.get(qid, []) if sparse_run else []
+        c_list = colbert_run.get(qid, []) if colbert_run else []
+
+        # union candidate set (stable)
+        cand, seen = [], set()
+        for lst in (d_list, s_list, c_list):
+            for _sc, _tx, did in lst:
+                if did not in seen:
+                    cand.append(did); seen.add(did)
+        m = len(cand)
+        if m == 0:
+            for k in runs_out.keys():
+                runs_out[k][str(qid)] = {} if pytrec_ready else []
+            continue
+
+        id_to_idx = {did: j for j, did in enumerate(cand)}
+        did_to_text = {}
+        for lst in (d_list, s_list, c_list):
+            for _sc, tx, did in lst:
+                if did not in did_to_text:
+                    did_to_text[did] = tx
+
+        # pack scores aligned to cand order
+        def pack(lst):
+            v = torch.full((m,), float("-inf"), dtype=torch.float32)
+            for sc, _tx, did in lst:
+                j = id_to_idx.get(did)
+                if j is not None:
+                    v[j] = float(sc)
+            return v
+
+        v_d = pack(d_list) if dense_run else torch.full((m,), float("-inf"))
+        v_s = pack(s_list) if sparse_run else torch.full((m,), float("-inf"))
+        v_c = pack(c_list) if colbert_run else torch.full((m,), float("-inf"))
+
+        # normalize/RRF
+        def norm_row(vec, method):
+            if method == "raw": return vec
+            mask = torch.isfinite(vec)
+            if not mask.any(): return vec
+            x = vec[mask]
+            if method == "z":
+                mu = x.mean(); sd = x.std(unbiased=False) or torch.tensor(1.0)
+                out = vec.clone(); out[mask] = (x - mu) / sd; return out
+            if method == "minmax":
+                mn, mx = x.min(), x.max(); denom = (mx - mn) if (mx > mn) else torch.tensor(1.0)
+                out = vec.clone(); out[mask] = (x - mn) / denom; return out
+            if method == "rrf":
+                # ranks on finite entries only
+                order = torch.argsort(x, descending=True)
+                inv = torch.empty_like(order); inv[order] = torch.arange(order.numel())
+                ranks = torch.full_like(vec, float("inf"))
+                ranks[mask] = (inv + 1).float()
+                out = torch.zeros_like(vec)
+                finite = torch.isfinite(ranks)
+                out[finite] = 1.0 / (60 + ranks[finite])  # k=60
+                return out
+            raise ValueError(f"Unknown norm {method}")
+
+        n_d = norm_row(v_d, norm)
+        n_s = norm_row(v_s, norm)
+        n_c = norm_row(v_c, norm)
+
+        # standalone & fused
+        ds   = 0.5 * (n_d + n_s)
+        dc   = 0.5 * (n_d + n_c)
+        sc   = 0.5 * (n_s + n_c)
+        all3 = (alpha * n_d + beta * n_s + gamma * n_c) / (alpha + beta + gamma)
+
+        # make outputs
+        qid_str = str(qid)
+        dense_items   = topk_from_vec(n_d if norm != "raw" else v_d, cand, did_to_text)
+        sparse_items  = topk_from_vec(n_s if norm != "raw" else v_s, cand, did_to_text)
+        colbert_items = topk_from_vec(n_c if norm != "raw" else v_c, cand, did_to_text)
+        ds_items      = topk_from_vec(ds,   cand, did_to_text)
+        dc_items      = topk_from_vec(dc,   cand, did_to_text)
+        sc_items      = topk_from_vec(sc,   cand, did_to_text)
+        all3_items    = topk_from_vec(all3, cand, did_to_text)
+
+        if pytrec_ready:
+            runs_out["dense"][qid_str]          = list_to_pytrec(dense_items)
+            runs_out["sparse"][qid_str]         = list_to_pytrec(sparse_items)
+            runs_out["colbert"][qid_str]        = list_to_pytrec(colbert_items)
+            runs_out["dense_sparse"][qid_str]   = list_to_pytrec(ds_items)
+            runs_out["dense_colbert"][qid_str]  = list_to_pytrec(dc_items)
+            runs_out["sparse_colbert"][qid_str] = list_to_pytrec(sc_items)
+            runs_out["all_three"][qid_str]      = list_to_pytrec(all3_items)
+        else:
+            runs_out["dense"][qid_str]          = dense_items
+            runs_out["sparse"][qid_str]         = sparse_items
+            runs_out["colbert"][qid_str]        = colbert_items
+            runs_out["dense_sparse"][qid_str]   = ds_items
+            runs_out["dense_colbert"][qid_str]  = dc_items
+            runs_out["sparse_colbert"][qid_str] = sc_items
+            runs_out["all_three"][qid_str]      = all3_items
+
+    return runs_out
+
+
+def fuse_runs_old(
+    query_ids: List[str],
+    dense_run: Dict[str, List[Tuple[float, str, str]]] = None,
+    sparse_run: Dict[str, List[Tuple[float, str, str]]] = None,
+    colbert_run: Dict[str, List[Tuple[float, str, str]]] = None,
+    norm: str = "z",     # "raw" | "z" | "minmax" | "rrf"
+    alpha: float = 1.0,  # weight for dense
+    beta: float = 1.0,   # weight for sparse
+    gamma: float = 1.0,  # weight for colbert
+    TOPK: int = 100,
+) -> Dict[str, Dict[str, List[Tuple[float, str, str]]]]:
+    """
+    Returns the 7 runs: {"dense": {...}, "sparse": {...}, "colbert": {...},
+                         "dense_sparse": {...}, "dense_colbert": {...},
+                         "sparse_colbert": {...}, "all_three": {...}}
+    per query: [(score, text, doc_id)...] sorted desc, truncated to TOPK.
+    """
+    runs_out = {
+        "dense": {}, "sparse": {}, "colbert": {},
+        "dense_sparse": {}, "dense_colbert": {}, "sparse_colbert": {}, "all_three": {}
+    }
+
+    # For each query, build union candidate set
+    for qid in query_ids:
+        d_list = dense_run.get(qid, []) if dense_run else []
+        s_list = sparse_run.get(qid, []) if sparse_run else []
+        c_list = colbert_run.get(qid, []) if colbert_run else []
+
+        # union doc_ids preserving some stable order (dense -> sparse -> colbert)
+        cand = []
+        seen = set()
+        for lst in (d_list, s_list, c_list):
+            for _sc, _tx, did in lst:
+                if did not in seen:
+                    cand.append(did)
+                    seen.add(did)
+        m = len(cand)
+        if m == 0:
+            # no candidates
+            for k in runs_out.keys():
+                runs_out[k][qid] = []
+            continue
+
+        id_to_idx = {did: j for j, did in enumerate(cand)}
+        # keep a text exemplar per doc_id (prefer dense->sparse->colbert)
+        did_to_text = {}
+        for lst in (d_list, s_list, c_list):
+            for _sc, tx, did in lst:
+                if did not in did_to_text:
+                    did_to_text[did] = tx
+
+        # pack scores aligned to cand order
+        v_d = _scores_to_tensor(d_list, id_to_idx, m) if dense_run else torch.full((m,), float("-inf"))
+        v_s = _scores_to_tensor(s_list, id_to_idx, m) if sparse_run else torch.full((m,), float("-inf"))
+        v_c = _scores_to_tensor(c_list, id_to_idx, m) if colbert_run else torch.full((m,), float("-inf"))
+
+        # normalize or RRF
+        if norm == "rrf":
+            n_d = _rrf_from_scores(v_d)
+            n_s = _rrf_from_scores(v_s)
+            n_c = _rrf_from_scores(v_c)
+        else:
+            n_d = _norm_row(v_d, norm)
+            n_s = _norm_row(v_s, norm)
+            n_c = _norm_row(v_c, norm)
+
+        # standalone
+        def topk_from_vec(vec):
+            idx = torch.argsort(vec, descending=True)
+            out = []
+            for j in idx[:TOPK]:
+                j = int(j)
+                sc = float(vec[j])
+                if not np.isfinite(sc):  # skip missing
+                    continue
+                did = cand[j]
+                out.append((sc, did_to_text.get(did, ""), did))
+            return out
+
+        runs_out["dense"][qid]   = topk_from_vec(n_d if norm != "raw" else v_d)
+        runs_out["sparse"][qid]  = topk_from_vec(n_s if norm != "raw" else v_s)
+        runs_out["colbert"][qid] = topk_from_vec(n_c if norm != "raw" else v_c)
+
+        # fused
+        ds = 0.5 * (n_d + n_s) if norm != "raw" and norm != "rrf" else 0.5 * (n_d + n_s)
+        dc = 0.5 * (n_d + n_c)
+        sc = 0.5 * (n_s + n_c)
+        all3 = (alpha * n_d + beta * n_s + gamma * n_c) / (alpha + beta + gamma)
+
+        runs_out["dense_sparse"][qid]  = topk_from_vec(ds)
+        runs_out["dense_colbert"][qid] = topk_from_vec(dc)
+        runs_out["sparse_colbert"][qid]= topk_from_vec(sc)
+        runs_out["all_three"][qid]     = topk_from_vec(all3)
+
+    return runs_out
+
+
+@torch.no_grad()
+def retrieve_bgem3_streamed(
+    model,
+    docs,                # dict: {doc_id: text}
+    doc_ids,             # list ordered
+    queries,             # list[str]
+    query_ids,           # list[str], same len as queries
+    *,
+    # per-modality knobs (safe defaults for your scale)
+    MAX_QUERY_LEN=48,
+    MAX_DOC_LEN_DENSE=4096,
+    MAX_DOC_LEN_SPARSE=4096,
+    MAX_DOC_LEN_COLBERT=4096,
+    SHARD_DENSE=1500,
+    SHARD_SPARSE=1500,
+    SHARD_COLBERT=800,
+    BATCH_DENSE=8,
+    BATCH_SPARSE=8,
+    BATCH_COLBERT=2,
+    K_PER_MODALITY=300,          # keep more here
+    K_FINAL=100,                  # return this many
+    FUSION_NORM="rrf",            # "rrf" | "z" | "minmax" | "raw"
+    WEIGHTS=(1.0, 1.0, 1.0),      # (alpha, beta, gamma)
+    DEVICE="cuda" if torch.cuda.is_available() else "cpu",
+    run_dense=True,
+    run_sparse=True,
+    run_colbert=True,
+):
+    dense_run = sparse_run = colbert_run = None
+
+    if run_dense:
+        print(">>> Running dense pass...")
+        dense_run = run_dense_streamed(
+            model, docs, doc_ids, queries, query_ids,
+            MAX_QUERY_LEN=MAX_QUERY_LEN,
+            MAX_DOC_LEN=MAX_DOC_LEN_DENSE,
+            SHARD_SIZE=SHARD_DENSE,
+            DOC_BATCH=BATCH_DENSE,
+            TOPK=K_PER_MODALITY,
+            DEVICE=DEVICE,
+        )
+
+    if run_sparse:
+        print(">>> Running sparse pass...")
+        sparse_run = run_sparse_streamed(
+            model, docs, doc_ids, queries, query_ids,
+            MAX_QUERY_LEN=MAX_QUERY_LEN,
+            MAX_DOC_LEN=MAX_DOC_LEN_SPARSE,
+            SHARD_SIZE=SHARD_SPARSE,
+            DOC_BATCH=BATCH_SPARSE,
+            TOPK=K_PER_MODALITY,
+        )
+
+    if run_colbert:
+        print(">>> Running colbert pass...")
+        colbert_run = run_colbert_streamed(
+            model, docs, doc_ids, queries, query_ids,
+            MAX_QUERY_LEN=MAX_QUERY_LEN,
+            MAX_DOC_LEN=MAX_DOC_LEN_COLBERT,
+            SHARD_SIZE=SHARD_COLBERT,
+            DOC_BATCH=BATCH_COLBERT,
+            TOPK=K_PER_MODALITY,
+        )
+
+    print(">>> Fusing runs with norm =", FUSION_NORM)
+
+    alpha, beta, gamma = WEIGHTS
+    runs = fuse_runs(
+        query_ids,
+        dense_run=dense_run,
+        sparse_run=sparse_run,
+        colbert_run=colbert_run,
+        norm=FUSION_NORM,
+        alpha=alpha, beta=beta, gamma=gamma,
+        TOPK=K_FINAL,
+    )
+    return runs
+
+# @torch.no_grad()
+# def embed_bge_sparse_all_streamed(
+#     model,
+#     docs: Dict,                 # {doc_id: text}
+#     queries: List[str],
+#     doc_ids: List,
+#     query_ids: List[str],
+#     reuse_run: bool,
+#     MAX_QUERY_LEN: int,
+#     MAX_DOC_LEN: int,
+#     SHARD_SIZE: int = 1500,
+#     DOC_BATCH: int = 2,
+#     TOPK: int = 100,
+#     NORM: str = "z",            # "raw" | "z" | "minmax"
+#     DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu",
+# ):
+#     """
+#     Streamed, memory-safe embed + similarity + fusion for BGE-M3 (dense, sparse, ColBERT).
+#     Returns top-K per query for each run variant (same keys as before).
+#     """
+
+#     # --- 0) Prepare ordered doc lists ---
+#     # keep order stable
+#     doc_texts = [docs[d] for d in doc_ids]
+
+#     # --- 1) Encode queries once (all heads) ---
+#     model = model  # BGEM3FlagModel
+#     # Ensure eval mode
+#     if hasattr(model, "eval"):
+#         model.eval()
+
+#     q_out = model.encode(
+#         queries,
+#         batch_size=2,
+#         max_length=MAX_QUERY_LEN,
+#         return_dense=True,
+#         return_sparse=True,
+#         return_colbert_vecs=True,
+#     )
+#     # Extract
+#     q_dense = torch.tensor(q_out["dense_vecs"], dtype=torch.float32, device=DEVICE)  # (nq, d)
+#     q_lex   = q_out["lexical_weights"]                                              # model-specific sparse container
+#     q_col   = q_out["colbert_vecs"]                                                 # shape per model; keep on CPU/GPU as needed
+
+#     nq = len(queries)
+#     # Optional: L2 normalize dense for cosine
+#     q_dense = torch.nn.functional.normalize(q_dense, p=2, dim=1)
+
+#     # --- 2) If NORM requires, make a FIRST PASS to collect stats per modality ---
+#     need_stats = NORM in ("z", "minmax")
+#     if need_stats:
+#         stats_dense   = _RunningStats(nq)
+#         stats_sparse  = _RunningStats(nq)
+#         stats_colbert = _RunningStats(nq)
+
+#         for block_ids, block_texts in _iterate_shards(doc_texts, doc_ids, SHARD_SIZE):
+#             # Encode shard (all heads)
+#             d_out = model.encode(
+#                 block_texts,
+#                 batch_size=DOC_BATCH,
+#                 max_length=MAX_DOC_LEN,
+#                 return_dense=True,
+#                 return_sparse=True,
+#                 return_colbert_vecs=True,
+#             )
+#             # Dense sims
+#             d_dense = torch.tensor(d_out["dense_vecs"], dtype=torch.float32, device=DEVICE)
+#             d_dense = torch.nn.functional.normalize(d_dense, p=2, dim=1)
+#             sims_dense = (q_dense @ d_dense.T).detach().cpu().numpy()  # (nq, m)
+#             stats_dense.update_from_block(sims_dense)
+
+#             # Sparse sims (CPU)
+#             sims_sparse = compute_sparse_similarity(model, q_lex, d_out["lexical_weights"])
+#             sims_sparse = sims_sparse.cpu().numpy()
+#             # expected to return (nq, m) numpy
+#             stats_sparse.update_from_block(sims_sparse)
+
+#             # ColBERT sims (often GPU-heavy; ensure it returns numpy)
+#             sims_colbert = compute_colbert_similarity(q_col, d_out["colbert_vecs"], model)
+#             sims_colbert = sims_colbert.cpu().numpy()
+#             stats_colbert.update_from_block(sims_colbert)
+
+#             # cleanup
+#             del d_out, d_dense, sims_dense, sims_sparse, sims_colbert
+#             gc.collect()
+#             if DEVICE.startswith("cuda"):
+#                 torch.cuda.empty_cache()
+
+#         # finalize stats
+#         dense_mean, dense_std = stats_dense.mean, stats_dense.finalize_std()
+#         dense_min, dense_max = stats_dense.minv, stats_dense.maxv
+#         sparse_mean, sparse_std = stats_sparse.mean, stats_sparse.finalize_std()
+#         sparse_min, sparse_max = stats_sparse.minv, stats_sparse.maxv
+#         colbert_mean, colbert_std = stats_colbert.mean, stats_colbert.finalize_std()
+#         colbert_min, colbert_max = stats_colbert.minv, stats_colbert.maxv
+#     else:
+#         dense_mean = dense_std = dense_min = dense_max = None
+#         sparse_mean = sparse_std = sparse_min = sparse_max = None
+#         colbert_mean = colbert_std = colbert_min = colbert_max = None
+
+#     # --- 3) SECOND PASS: compute normalized sims per shard, fuse, and push to heaps ---
+#     # Prepare heaps per run per query
+#     run_names = ["dense", "sparse", "colbert",
+#                  "dense_sparse", "dense_colbert", "sparse_colbert", "all_three"]
+#     heaps = {rn: {qid: [] for qid in query_ids} for rn in run_names}
+
+#     for block_ids, block_texts in _iterate_shards(doc_texts, doc_ids, SHARD_SIZE):
+#         # Encode shard (all heads)
+#         d_out = model.encode(
+#             block_texts,
+#             batch_size=DOC_BATCH,
+#             max_length=MAX_DOC_LEN,
+#             return_dense=True,
+#             return_sparse=True,
+#             return_colbert_vecs=True,
+#         )
+
+#         # Dense sims
+#         d_dense = torch.tensor(d_out["dense_vecs"], dtype=torch.float32, device=DEVICE)
+#         d_dense = torch.nn.functional.normalize(d_dense, p=2, dim=1)
+#         sims_dense = (q_dense @ d_dense.T).detach().cpu().numpy()
+
+#         # Sparse sims
+#         sims_sparse = compute_sparse_similarity(model, q_lex, d_out["lexical_weights"]).cpu().numpy()  # (nq, m) numpy
+
+#         # ColBERT sims
+#         sims_colbert = compute_colbert_similarity(q_col, d_out["colbert_vecs"], model).cpu().numpy()  # (nq, m) numpy
+
+#         # Normalize per modality
+#         if NORM == "raw":
+#             dN = sims_dense; sN = sims_sparse; cN = sims_colbert
+#         elif NORM == "z":
+#             dN = _normalize_block(sims_dense, "z", mean=dense_mean, std=dense_std)
+#             sN = _normalize_block(sims_sparse, "z", mean=sparse_mean, std=sparse_std)
+#             cN = _normalize_block(sims_colbert, "z", mean=colbert_mean, std=colbert_std)
+#         elif NORM == "minmax":
+#             dN = _normalize_block(sims_dense, "minmax", minv=dense_min, maxv=dense_max)
+#             sN = _normalize_block(sims_sparse, "minmax", minv=sparse_min, maxv=sparse_max)
+#             cN = _normalize_block(sims_colbert, "minmax", minv=colbert_min, maxv=colbert_max)
+#         else:
+#             raise ValueError(f"Unsupported NORM '{NORM}'")
+
+#         # Fusions
+#         ds = 0.5 * dN + 0.5 * sN
+#         dc = 0.5 * dN + 0.5 * cN
+#         sc = 0.5 * sN + 0.5 * cN
+#         all3 = (dN + sN + cN) / 3.0
+
+#         # convert to torch BEFORE pushing
+#         dN   = torch.from_numpy(dN).float()
+#         sN   = torch.from_numpy(sN).float()
+#         cN   = torch.from_numpy(cN).float()
+#         ds   = torch.from_numpy(ds).float()
+#         dc   = torch.from_numpy(dc).float()
+#         sc   = torch.from_numpy(sc).float()
+#         all3 = torch.from_numpy(all3).float()
+
+#         # Push into heaps
+#         _heap_pushk(heaps["dense"],         query_ids, dN,  block_ids, block_texts, TOPK)
+#         _heap_pushk(heaps["sparse"],        query_ids, sN,  block_ids, block_texts, TOPK)
+#         _heap_pushk(heaps["colbert"],       query_ids, cN,  block_ids, block_texts, TOPK)
+#         _heap_pushk(heaps["dense_sparse"],  query_ids, ds,  block_ids, block_texts, TOPK)
+#         _heap_pushk(heaps["dense_colbert"], query_ids, dc,  block_ids, block_texts, TOPK)
+#         _heap_pushk(heaps["sparse_colbert"],query_ids, sc,  block_ids, block_texts, TOPK)
+#         _heap_pushk(heaps["all_three"],     query_ids, all3,block_ids, block_texts, TOPK)
+
+#         # cleanup
+#         del d_out, d_dense, sims_dense, sims_sparse, sims_colbert, dN, sN, cN, ds, dc, sc, all3
+#         gc.collect()
+#         if DEVICE.startswith("cuda"):
+#             torch.cuda.empty_cache()
+
+#     # --- 4) Format output like before: query -> list of (score, text, doc_id) ---
+#     runs = {}
+#     for rn in run_names:
+#         runs[rn] = {}
+#         for qid in query_ids:
+#             runs[rn][qid] = _heap_to_sorted_list(heaps[rn][qid])
+
+#     return runs
+
+
+def embed_bge_sparse_all(model, docs, queries, doc_ids, query_ids, reuse_run):
     """
     Embed queries and docs with BGE-M3 heads and compute zero-shot runs.
 
@@ -813,7 +1664,7 @@ def embed_bge_sparse(model, docs, queries, doc_ids, query_ids, reuse_run):
     print("Embedding queries...", end="")
     q_out = model.encode(
         queries,
-        batch_size=16,
+        batch_size=2,
         max_length=MAX_QUERY_LEN,
         return_dense=True,
         return_sparse=True,
@@ -823,7 +1674,7 @@ def embed_bge_sparse(model, docs, queries, doc_ids, query_ids, reuse_run):
     print("Embedding docs...", end="")
     d_out = model.encode(
         docs,
-        batch_size=16,
+        batch_size=2,
         max_length=MAX_DOC_LEN,
         return_dense=True,
         return_sparse=True,
@@ -882,6 +1733,62 @@ def embed_bge_sparse(model, docs, queries, doc_ids, query_ids, reuse_run):
         "all_three": retrieve(query_ids, doc_ids, all_three_sim),
     }
     return runs
+
+
+def embed_bge_sparse(model, docs, queries, doc_ids, query_ids, reuse_run):
+    """
+    Embed queries and docs with BGE-M3 heads and compute zero-shot runs.
+
+    Parameters
+    ----------
+    model : BGEM3FlagModel
+        BGE-M3 model instance.
+    docs : dict of {hashable: str}
+        Mapping from document IDs to document texts.
+    queries : list of str
+        Query strings.
+    doc_ids : list
+        Ordered list of document identifiers.
+    query_ids : list
+        Ordered list of query identifiers.
+    reuse_run : bool
+        If True, attempt to reuse existing runs (not used).
+
+    Returns
+    -------
+    dict of str -> dict
+        Mapping from run name to retrieval results
+        (query -> list of (score, text, doc_id)).
+    """
+    # 1) Encode queries and docs
+    print("Embedding queries...", end="")
+    q_out = model.encode(
+        queries,
+        batch_size=2,
+        max_length=MAX_QUERY_LEN,
+        return_dense=False,
+        return_sparse=True,
+        return_colbert_vecs=False,
+    )
+    print("Done.")
+    print("Embedding docs...", end="")
+    d_out = model.encode(
+        docs,
+        batch_size=2,
+        max_length=MAX_DOC_LEN,
+        return_dense=False,
+        return_sparse=True,
+        return_colbert_vecs=False,
+    )
+    print("Done.")
+
+    sparse_sim = compute_sparse_similarity(
+        model,
+        q_out["lexical_weights"],
+        d_out["lexical_weights"],
+    )
+
+    return retrieve(query_ids, doc_ids, sparse_sim)
 
 
 def embed_bge_hybrid_sliding_window(model, doc_dict, query_dict, reuse_run):
@@ -2284,12 +3191,22 @@ def rerank_cross_encoder_chunked(model,
     dict
         Merged run mapping each query_id → {doc_id: aggregated_score}.
     """
+    if not isinstance(max_length, int) or not isinstance(stride, int):
+        raise TypeError("max_length and stride must be ints.")
+
+    if max_length <= 0:
+        raise ValueError(f"max_length must be > 0, got {max_length}.")
+
+    if stride < 0 or stride >= max_length:
+        raise ValueError(f"stride must be in [0, {max_length-1}], got {stride}.")
+
     device = torch.device("cuda")
     # instantiate or prepare model exactly as in your normal reranker
     if model_type == "bge":
         from FlagEmbedding import FlagLLMReranker
         model = FlagLLMReranker('BAAI/bge-reranker-v2-gemma', use_bf16=True)
         tokenizer = AutoTokenizer.from_pretrained('BAAI/bge-reranker-v2-gemma')
+        raise NotImplementedError("BGE reranking with chunking not implemented yet.")
     elif model_type == "sbert":
         from sentence_transformers import CrossEncoder
         model = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
@@ -2298,6 +3215,9 @@ def rerank_cross_encoder_chunked(model,
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.to(device)
         model.eval()
+    
+    if not tokenizer.is_fast:
+        raise ValueError("Chunking with overflow requires a fast tokenizer.")
 
     reranked_run = {}
 
@@ -2312,7 +3232,7 @@ def rerank_cross_encoder_chunked(model,
         encoding = tokenizer(
             query_texts,
             docs,
-            truncation=True,
+            truncation="only_second",   # true
             padding="max_length",
             max_length=max_length,
             stride=stride,
@@ -2493,6 +3413,10 @@ def get_eval_metrics(run, qrels_dev_df, all_docids, metrics):
     # check instance of run
     if len(run) < 10:
         metrics_all = {}
+        print("Multiple runs detected. Evaluating each run separately...")
+        print(f"Type of run: {type(run)}")
+        print(f"Run values: {list(run.values())[:1]}")  # print only first value to avoid clutter
+        print(f"Run keys: {list(run.keys())}")
         for run_name, run_ in run.items():
             results = evaluator.evaluate(run_)
     
@@ -2642,9 +3566,17 @@ def get_legal_dataset(path):
         # rename columns
         df.rename(columns={"Codigo": "id"}, inplace=True)
     elif path.endswith(".jsonl"):
+        fixed_lines = []
         # Load the dataset
         with open(path, 'r', encoding='utf-8') as f:
-            corpus_dict = [json.loads(line) for line in f]
+            for line in f:
+                try:
+                    json.loads(line)
+                    fixed_lines.append(line)
+                except json.JSONDecodeError:
+                    pass
+            corpus_dict = [json.loads(line) for line in fixed_lines]
+            print(f"Loaded {len(corpus_dict)} records from {path}")
         df = pd.DataFrame(corpus_dict)
     else:
         raise ValueError("Path must end with .json or .jsonl")

@@ -102,3 +102,5 @@ src/scripts/test_encoder_only_m3_bge-m3_sd*/
 test_encoder_only_m3_bge-m3_sd*/
 
 docs_to_annotate/
+
+indexes/
