@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 from datasets import load_from_disk
 import random
 import json
@@ -29,12 +29,14 @@ from config.config import STORAGE_DIR
 def finetune():
     base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
     
-    train_ds_path = "bce_6x_summary_1024_baai.jsonl"
+    # train_ds_path = "bce_6x_summary_1024_baai.jsonl"
+    # train_ds_path = "bce_6x_inpars_synthetic_baai.jsonl"
+    train_ds_path = "bge_finetune_12x_inpars_v2_corta_dedup_train_baai.jsonl"
     train_ds_path = os.path.join(base_dir, "datasets", "dual_encoder", train_ds_path)
 
     output_dir = os.path.join(STORAGE_DIR, "legal_ir", "results", "baai_finetuning")
 
-    run_name = "bge-m3_6x_54_summary_1024"
+    run_name = "bge-train-v2"
 
     output_dir = os.path.join(output_dir, run_name)
 
@@ -45,9 +47,9 @@ def finetune():
     --cache_dir ./cache/model \
     --train_data {train_ds_path}\
     --cache_path ./cache/data \
-    --train_group_size 7 \
-    --query_max_len 48 \
-    --passage_max_len 4096 \
+    --train_group_size 13 \
+    --query_max_len 24 \
+    --passage_max_len 1024 \
     --pad_to_multiple_of 8 \
     --knowledge_distillation False \
     --same_dataset_within_batch True \
@@ -56,17 +58,17 @@ def finetune():
     --deepspeed /home/leon/tesis/messirve-ir/ds_stage0.json \
     --output_dir {output_dir} \
     --overwrite_output_dir \
-    --learning_rate 5e-6 \
+    --learning_rate 3e-6 \
     --num_train_epochs 1 \
-    --per_device_train_batch_size 2 \
-    --gradient_accumulation_steps 8 \
+    --per_device_train_batch_size 4 \
+    --gradient_accumulation_steps 16 \
     --dataloader_drop_last True \
-    --warmup_ratio 0.1 \
+    --warmup_ratio 0.2 \
     --gradient_checkpointing \
     --logging_steps 1 \
     --save_steps 200 \
     --negatives_cross_device \
-    --temperature 0.02 \
+    --temperature 0.05 \
     --sentence_pooling_method cls \
     --normalize_embeddings True \
     --kd_loss_type m3_kd_loss \
@@ -76,7 +78,7 @@ def finetune():
     --max_grad_norm 0.5 \
     --bf16 \
     --save_total_limit 2 \
-    > bge-m3_6x_54_summary_1024.log 2>&1 &
+    > {run_name}.log 2>&1 &
 """
     # --self_distill_start_step 0 \
     # --resume_from_checkpoint {os.path.join(output_dir, "checkpoint-5400")} \
