@@ -4,7 +4,17 @@ Idea: Generate responses for 50k queries from the MS MARCO dataset.
 Then finetune using InfoNCE loss with the responses instead of the queries.
 """
 import sys
-sys.path.append("home/leon/tesis/messirve-ir")
+import os
+
+def configure_python_path():
+    project_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir)
+    )
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+# Apply the path tweak before any project imports
+configure_python_path()
 
 import json
 from src.utils.train_utils import get_msmarco_hard_negatives, get_msmarco_queries
@@ -13,7 +23,6 @@ from tqdm import tqdm
 import codecs
 import ir_datasets
 from src.utils.retrieval_utils import get_legal_dataset, get_legal_queries
-import os
 from config.config import STORAGE_DIR
 from pathlib import Path
 
@@ -324,7 +333,8 @@ def create_jsonl_original_annotation_mistral():
 
 
 def create_jsonl_inpars_mistral():
-    doc_ids, docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_py.csv"))
+    # doc_ids, docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_py.csv"))
+    doc_ids, docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_NEW.jsonl"))
 
     # v1
     sys_instruct = (
@@ -353,6 +363,20 @@ def create_jsonl_inpars_mistral():
         "{'Consulta corta': ['consulta1', 'consulta2', ...], 'Consulta compleja': ['consulta1', 'consulta2', ...], 'Consulta personalizada': ['consulta1', 'consulta2', ...]}\n"
         "No incluyas ningún otro texto o explicación adicional."
     )
+    
+    sys_instruct_v2_corpus_NEW = (
+        "Eres un abogado penalista paraguayo, experto en análisis jurisprudencial y sistemas de búsqueda.\n"
+        "A continuación, recibirás un documento legal completo. Genera tres consultas de tres tipos distintos, "
+        "que un abogado podría ingresar en un buscador jurídico para encontrar exactamente este documento.\n"
+        "Los tres tipos de consulta se especifican a continuación:\n"
+        "1) Consulta corta: Usa muy pocas palabras para describir el caso. Ejemplos: 'Hurto agravado', 'Violación de derechos de adolescentes'.\n"
+        "2) Consulta compleja: Incluya más detalles clave del caso. La consulta debe mencionar claramente los aspectos que caracterizan el caso y que permiten distinguirlo "
+        "contra otros casos. No incluyas nombres de personas. Ejemplo: 'Recurso extraordinario de casación inadmisible por falta de cédula de notificación en tentativa de homicidio en Encarnación'.\n"
+        "3) Consulta tipo pregunta: Formula una pregunta que este caso responde. Debe ser una pregunta que un abogado podría ingresar en un RAG Chat.\n"
+        "Devuelve tu respuesta únicamente en formato JSON:\n"
+        "{'Consulta corta': 'consulta', 'Consulta compleja': 'consulta', 'Consulta tipo pregunta': 'consulta'}\n"
+        "No incluyas ningún otro texto o explicación adicional."
+    )
 
     sys_instruct_v3 = (
         "Eres un abogado penalista paraguayo experto en análisis jurisprudencial y sistemas de búsqueda.\n"
@@ -379,7 +403,7 @@ def create_jsonl_inpars_mistral():
                 "body": {
                     "max_tokens": 256,
                     "messages": [
-                        {"role": "system", "content": sys_instruct},
+                        {"role": "system", "content": sys_instruct_v2_corpus_NEW},
                         {"role": "user",
                             "content": user_template.format(doc=doc_text)}
                     ],
@@ -392,7 +416,7 @@ def create_jsonl_inpars_mistral():
     print(len(requests))
 
     # write requests to jsonl file
-    file_path = f"batch_requests_mistral_inpars.jsonl"
+    file_path = f"batch_requests_mistral_inpars_v2_corpus_NEW.jsonl"
     with open(file_path, "w", encoding="utf-8") as f:
         for request in requests:
             f.write(json.dumps(request, ensure_ascii=False) + "\n")
@@ -547,6 +571,57 @@ def create_qrels_from_response(in_path, out_path):
 
 
 def create_qrels_from_inpars_response(in_path, out_path_queries, out_path_qrels):
+    """
+    Convert an InPars-style response file into queries and qrels files.
+
+    This function reads a JSON file containing document IDs mapped to
+    serialized query dictionaries. For each document, it parses the queries
+    and generates two output files:
+    
+    - A queries file: stores query IDs and their corresponding text.
+    - A qrels file: stores query-document relevance judgments in TREC format.
+
+    Each document is expected to have at least three queries, which are mapped
+    to the suffixes "corta", "compleja", and "pregunta".
+
+    Parameters
+    ----------
+    in_path : str
+        Path to the input JSON file containing InPars-style responses. 
+        The JSON should map each document ID (str) to a JSON-encoded dict of queries.
+    out_path_queries : str
+        Path to the output file where query IDs and their texts will be written.
+        Each line has the format: "<qid>\\t<query_text>".
+    out_path_qrels : str
+        Path to the output file where query-document relevance judgments
+        will be written. Each line has the format: "<qid>\\t0\\t<doc_id>\\t1".
+
+    Notes
+    -----
+    - The function assumes that each document has at least 3 queries.
+    - Query IDs are constructed as "<doc_id>_<mapping>", where `mapping` is one of:
+        ["corta", "compleja", "pregunta"].
+    - Lines with invalid or undecodable JSON queries are skipped with an error message.
+    - Output files are overwritten if they already exist.
+
+    Example
+    -------
+    Suppose the input JSON (`in_path`) contains:
+        {
+            "13995": "{\\"query1\\": \\"Hurto agravado\\", \\"query2\\": \\"Caso complejo\\", \\"query3\\": \\"¿Qué pena corresponde?\\"}"
+        }
+
+    The function will produce:
+        Queries file (`out_path_queries`):
+            13995_corta    Hurto agravado
+            13995_compleja Caso complejo
+            13995_pregunta ¿Qué pena corresponde?
+
+        Qrels file (`out_path_qrels`):
+            13995_corta    0    13995    1
+            13995_compleja 0    13995    1
+            13995_pregunta 0    13995    1
+    """
     with open(in_path, 'r', encoding='utf-8') as f:
         response = json.load(f)
     
@@ -565,17 +640,19 @@ def create_qrels_from_inpars_response(in_path, out_path_queries, out_path_qrels)
                 print(f"Error decoding JSON for custom_id {doc_id}: {queries}")
                 continue
             
-            assert isinstance(queries, list), (
-                f"Value for doc_id '{doc_id}' is not a list after parsing."
+            assert isinstance(queries, dict), (
+                f"Value for doc_id '{doc_id}' is not a dict after parsing."
             )
             assert len(queries) >= 3, (
                 f"Expected min. 3 elements for doc_id '{doc_id}', but got {len(queries)}."
             )
+
+            mapping = ["corta", "compleja", "pregunta"]
             
             for i, query in enumerate(queries):
-                qid = f"{doc_id}_Q{i+1}"
+                qid = f"{doc_id}_{mapping[i]}"
                 # Write to qrels file
-                f_queries.write(f"{qid}\t{query}\n")
+                f_queries.write(f"{qid}\t{queries[query]}\n")
                 # Write to qrels file (qid  0   doc_id  label)
                 f_qrels.write(f"{qid}\t0\t{doc_id}\t1\n")
 
@@ -676,28 +753,162 @@ def create_corpus_from_summaries(summaries_file, output_file):
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     
     print(f"Corpus created with {len(data)} documents in {output_file}")
-        
+
+
+def split_inpars_v2_queries(in_path, out_path_corta, out_path_compleja, out_path_pregunta):
+    """
+    inpars v2 query file looks like this:
+        13995_corta	Recurso de casación inadmisible
+        13995_compleja	Recurso de casación inadmisible por falta de cédula de notificación en caso de tentativa de homicidio en Encarnación
+        13995_pregunta	¿Por qué fue inadmisible el recurso de casación en un caso de tentativa de homicidio en Encarnación por falta de cédula de notificación?
+
+    Goal of this function is to split it into three files:
+        queries_corta.tsv
+        queries_compleja.tsv
+        queries_pregunta.tsv
+
+    """
+    with open(in_path, "r", encoding="utf-8") as in_queries, \
+         open(out_path_corta, "w", encoding="utf-8") as out_corta, \
+         open(out_path_compleja, "w", encoding="utf-8") as out_compleja, \
+         open(out_path_pregunta, "w", encoding="utf-8") as out_pregunta:
+
+        for line in in_queries:
+            qid, query = line.strip().split("\t", 1)  # split only once
+            if qid.endswith("_corta"):
+                out_corta.write(f"{qid}\t{query}\n")
+            elif qid.endswith("_compleja"):
+                out_compleja.write(f"{qid}\t{query}\n")
+            elif qid.endswith("_pregunta"):
+                out_pregunta.write(f"{qid}\t{query}\n")
+            else:
+                print(f"⚠️ Unknown query id format: {qid}")
+
+
+def split_inpars_v2_qrels(in_path, out_path_corta, out_path_compleja, out_path_pregunta):
+    """
+    inpars v2 qrel file looks like this:
+        13995_corta	0	13995	1
+        13995_compleja	0	13995	1
+        13995_pregunta	0	13995	1
+
+    Goal of this function is to split it into three files:
+        qrels_corta.tsv
+        qrels_compleja.tsv
+        qrels_pregunta.tsv
+    """
+    with open(in_path, "r", encoding="utf-8") as in_qrels, \
+         open(out_path_corta, "w", encoding="utf-8") as out_corta, \
+         open(out_path_compleja, "w", encoding="utf-8") as out_compleja, \
+         open(out_path_pregunta, "w", encoding="utf-8") as out_pregunta:
+
+        for line in in_qrels:
+            qid, zero, doc_id, relevance = line.strip().split("\t")
+            if qid.endswith("_corta"):
+                out_corta.write(f"{qid}\t{zero}\t{doc_id}\t{relevance}\n")
+            elif qid.endswith("_compleja"):
+                out_compleja.write(f"{qid}\t{zero}\t{doc_id}\t{relevance}\n")
+            elif qid.endswith("_pregunta"):
+                out_pregunta.write(f"{qid}\t{zero}\t{doc_id}\t{relevance}\n")
+            else:
+                print(f"⚠️ Unknown query id format: {qid}")
+
+
+def dedup_inpars_queries(in_path, out_path):
+    qids, queries = get_legal_queries(in_path)
+
+    # map query → first qid
+    query_to_qid = {}
+    for qid, query in zip(qids, queries):
+        if query not in query_to_qid:
+            query_to_qid[query] = qid
+
+    print(f"Original: {len(queries)}")
+    print(f"Deduped: {len(query_to_qid)}")
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        for query, qid in query_to_qid.items():
+            f.write(f"{qid}\t{query}\n")
+
+
+import pandas as pd
+
+def filter_qrels_by_deduped_queries(dedup_queries_path, qrels_path, out_path):
+    """
+    Filter a qrels.tsv file so it only contains entries whose qid
+    appears in the deduplicated queries file.
+
+    Parameters
+    ----------
+    dedup_queries_path : str
+        Path to deduplicated queries TSV (qid \t query).
+    qrels_path : str
+        Path to qrels TSV (qid \t run \t doc_id \t label).
+    out_path : str
+        Destination TSV with filtered qrels.
+    """
+    # load deduped queries
+    df_queries = pd.read_csv(dedup_queries_path, sep="\t", names=["qid", "query"], dtype=str)
+    keep_qids = set(df_queries["qid"].tolist())
+
+    # load qrels
+    df_qrels = pd.read_csv(qrels_path, sep="\t", names=["qid", "run", "doc_id", "label"], dtype=str)
+
+    # filter
+    df_filtered = df_qrels[df_qrels["qid"].isin(keep_qids)]
+
+    print(f"Original qrels: {len(df_qrels)}")
+    print(f"Filtered qrels: {len(df_filtered)}")
+
+    # save
+    df_filtered.to_csv(out_path, sep="\t", index=False, header=False)
+    print(f"[✓] Written filtered qrels to {out_path}")
 
 
 if __name__ == "__main__":
+    # dedup_inpars_queries(
+    #     os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries.tsv"),
+    #     os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries_dedup.tsv")
+    # )
+
+    filter_qrels_by_deduped_queries(
+        dedup_queries_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries_dedup.tsv"),
+        qrels_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels.tsv"),
+        out_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels_dedup.tsv")
+    )
+
     # requests = create_jsonl_original_annotation_mistral()
     # requests = create_jsonl_inpars_mistral()
     # requests = create_jsonl_summary_mistral()
 
     # process_response_file(
-    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "mistral_summary_1024.jsonl",
-    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "mistral_summary_1024_processed.json"
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "mistral_inpars_v2_corpus_NEW_out.jsonl",
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "mistral_inpars_v2_corpus_NEW_out_processed.json"
     # )
 
-    create_corpus_from_summaries(
-        Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "mistral_summary_1024_processed.json",
-        Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_mistral_summaries_1024.jsonl"
-    )
+    # create_corpus_from_summaries(
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "mistral_summary_1024_processed.json",
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_mistral_summaries_1024.jsonl"
+    # )
 
     # create_qrels_from_inpars_response(
-    #     in_path=Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "inpars_mistral-small-2501_processed.json",
-    #     out_path_queries=Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "inpars_mistral-small-2501_queries.tsv",
-    #     out_path_qrels=Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "inpars_mistral-small-2501_qrels.tsv"
+    #     in_path=Path(STORAGE_DIR) / "legal_ir" / "data" / "external" / "mistral" / "BatchAPI_outputs" / "mistral_inpars_v2_corpus_NEW_out_processed.json",
+    #     out_path_queries=Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "mistral_inpars_v2_corpus_NEW_queries.tsv",
+    #     out_path_qrels=Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "mistral_inpars_v2_corpus_NEW_qrels.tsv"
+    # )
+
+    # split_inpars_v2_queries(
+    #     in_path=Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "mistral_inpars_v2_corpus_NEW_queries.tsv",
+    #     out_path_corta=Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "mistral_inpars_v2_corpus_NEW_queries_corta.tsv",
+    #     out_path_compleja=Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "mistral_inpars_v2_corpus_NEW_queries_compleja.tsv",
+    #     out_path_pregunta=Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "mistral_inpars_v2_corpus_NEW_queries_pregunta.tsv"
+    # )
+
+    # split_inpars_v2_qrels(
+    #     in_path=Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "mistral_inpars_v2_corpus_NEW_qrels.tsv",
+    #     out_path_corta=Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "mistral_inpars_v2_corpus_NEW_qrels_corta.tsv",
+    #     out_path_compleja=Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "mistral_inpars_v2_corpus_NEW_qrels_compleja.tsv",
+    #     out_path_pregunta=Path(STORAGE_DIR) / "legal_ir" / "data" / "annotations" / "mistral_inpars_v2_corpus_NEW_qrels_pregunta.tsv"
     # )
 
     # create_qrels_from_response(

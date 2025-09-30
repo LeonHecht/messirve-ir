@@ -250,23 +250,35 @@ def build_baai_ds():
     base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
     corpus_dir = os.path.join(base_dir, "corpus")
     # query_path = os.path.join(corpus_dir, "consultas_sinteticas_380_filtered.tsv")
-    query_path = os.path.join(corpus_dir, "queries_54.tsv")
+    # query_path = os.path.join(corpus_dir, "queries_54.tsv")
+    query_path = os.path.join(corpus_dir, "mistral_inpars_v2_corpus_NEW_queries_corta_dedup.tsv")
     # corpus_path = os.path.join(corpus_dir, "corpus.jsonl")
-    corpus_path = os.path.join(corpus_dir, "corpus_mistral_summaries_1024.jsonl")
+    corpus_path = os.path.join(corpus_dir, "corpus_NEW.jsonl")
+    # corpus_path = os.path.join(corpus_dir, "corpus_mistral_summaries_1024.jsonl")
 
     qids, queries = get_legal_queries(query_path)
     dids, docs = get_legal_dataset(corpus_path)
     doc_dict = dict(zip(dids, docs))
 
+    # in_paths = [
+    #     "bce_6x_summary_1024_train.tsv",
+    #     "bce_6x_summary_1024_dev.tsv",
+    #     "bce_6x_summary_1024_test.tsv",
+    # ]
+    # out_paths = [
+    #     "bce_6x_summary_1024_train_baai.jsonl",
+    #     "bce_6x_summary_1024_dev_baai.jsonl",
+    #     "bce_6x_summary_1024_test_baai.jsonl",
+    # ]
     in_paths = [
-        "bce_6x_summary_1024_train.tsv",
-        "bce_6x_summary_1024_dev.tsv",
-        "bce_6x_summary_1024_test.tsv",
+        "bge_finetune_12x_inpars_v2_corta_dedup_train.tsv",
+        "bge_finetune_12x_inpars_v2_corta_dedup_dev.tsv",
+        "bge_finetune_12x_inpars_v2_corta_dedup_test.tsv"
     ]
     out_paths = [
-        "bce_6x_summary_1024_train_baai.jsonl",
-        "bce_6x_summary_1024_dev_baai.jsonl",
-        "bce_6x_summary_1024_test_baai.jsonl",
+        "bge_finetune_12x_inpars_v2_corta_dedup_train_baai.jsonl",
+        "bge_finetune_12x_inpars_v2_corta_dedup_dev_baai.jsonl",
+        "bge_finetune_12x_inpars_v2_corta_dedup_test_baai.jsonl",
     ]
 
     chunked = False
@@ -288,7 +300,7 @@ def build_baai_ds():
 
     for in_path, out_path in zip(in_paths, out_paths):
         convert_tsv_to_json(
-            os.path.join(base_dir, "datasets", "cross_encoder", in_path),
+            os.path.join(base_dir, "datasets", "dual_encoder", in_path),
             qids,
             queries,
             doc_dict,

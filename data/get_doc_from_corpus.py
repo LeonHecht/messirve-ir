@@ -1,5 +1,17 @@
 import sys
-sys.path.append("home/leon/tesis/messirve-ir")
+import os
+
+def configure_python_path():
+    project_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir)
+    )
+    print(f"Adding {project_root} to sys.path")
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+configure_python_path()
+
+
 from config.config import STORAGE_DIR
 from pathlib import Path
 import pandas as pd
@@ -33,7 +45,9 @@ def get_doc_from_corpus(docid, corpus_path):
 
 def main():
     # Define the path to the corpus
-    corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus.jsonl"
+    # corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus.jsonl"
+    corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_NEW.jsonl"
+    # corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_tesseract.jsonl"
     # corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_raw_google_ocr.csv"
     # corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_Gpt4o-mini_cleaned.jsonl"
     # corpus_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "corpus_chunk_headers.jsonl"
@@ -45,7 +59,7 @@ def main():
         return
     
     # Example docid to search for
-    docid = "96748"
+    docid = "102893"
     
     # Get the document text
     doc_text = get_doc_from_corpus(docid, corpus_path)
