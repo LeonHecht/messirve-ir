@@ -71,19 +71,19 @@ def freeze_query_split(
 
     # 5) Save for later
     save_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
-    pd.Series(train_qids).to_csv(os.path.join(save_dir, "qids_inpars_v2_dedup_train.txt"), index=False, header=False)
-    pd.Series(dev_qids).to_csv(os.path.join(save_dir, "qids_inpars_v2_dedup_dev.txt"), index=False, header=False)
-    pd.Series(test_qids).to_csv(os.path.join(save_dir, "qids_inpars_v2_dedup_test.txt"), index=False, header=False)
+    pd.Series(train_qids).to_csv(os.path.join(save_dir, "qids_inpars_v2_dedup_penal_mixed_1-1_train.txt"), index=False, header=False)
+    pd.Series(dev_qids).to_csv(os.path.join(save_dir, "qids_inpars_v2_dedup_penal_mixed_1-1_dev.txt"), index=False, header=False)
+    pd.Series(test_qids).to_csv(os.path.join(save_dir, "qids_inpars_v2_dedup_penal_mixed_1-1_test.txt"), index=False, header=False)
 
     print(f"Total queries: {n}")
-    print(f"→ Train: {len(train_qids)} qids saved to qids_inpars_v2_dedup_train.txt")
-    print(f"→ Dev:   {len(dev_qids)} qids saved to qids_inpars_v2_dedup_dev.txt")
-    print(f"→ Test:  {len(test_qids)} qids saved to qids_inpars_v2_dedup_test.txt")
+    print(f"→ Train: {len(train_qids)} qids saved to qids_inpars_v2_dedup_penal_mixed_1-1_train.txt")
+    print(f"→ Dev:   {len(dev_qids)} qids saved to qids_inpars_v2_dedup_penal_mixed_1-1_dev.txt")
+    print(f"→ Test:  {len(test_qids)} qids saved to qids_inpars_v2_dedup_penal_mixed_1-1_test.txt")
 
     return {"train": train_qids, "dev": dev_qids, "test": test_qids}
 
 
 if __name__ == "__main__":
     # splits = freeze_query_split(os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "inpars_mistral-small-2501_qrels.tsv"))
-    splits = freeze_query_split(os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels_dedup.tsv"))
+    splits = freeze_query_split(os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels_corta_dedup_penal_mixed_1-1.tsv"))
     # splits = freeze_query_split(os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "qrels_synthetic_mistral-small-2501_filtered.tsv"))

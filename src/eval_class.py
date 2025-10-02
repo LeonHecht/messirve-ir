@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import torch
 import pandas as pd
 import sys
@@ -168,8 +168,8 @@ class Evaluator:
             # rel_doc_ids = qrels_dev_df["doc_id"].unique()
 
         elif self.ds in ("legal-54", "legal-inpars", "legal-inpars-v2-corta", "legal-synthetic"):
-            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl"))
-            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_NEW.jsonl"))
+            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl"))
+            # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_NEW.jsonl"))
             # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_tesseract.jsonl"))
             # self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus_mistral_summaries_1024.jsonl"))
             # self.doc_ids, self.docs = get_legal_dataset_norm(os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl"), normalize=True)
@@ -186,21 +186,21 @@ class Evaluator:
                 self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "inpars_mistral-small-2501_qrels.tsv")
                 test_qids_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qids_inpars_test_Q1.txt")
             elif self.ds == "legal-inpars-v2-corta":
-                queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries_corta.tsv")
-                self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels_corta.tsv")
-                test_qids_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qids_inpars_v2_corta_test.txt")
+                queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries_corta_dedup.tsv")
+                self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels_corta_dedup.tsv")
+                test_qids_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qids_inpars_v2_corta_dedup_test.txt")
             elif self.ds == "legal-inpars-v2-compleja":
-                queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries_corta.tsv")
-                self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels_corta.tsv")
-                test_qids_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qids_inpars_v2_corta_test.txt")
+                queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries_compleja_dedup.tsv")
+                self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels_compleja_dedup.tsv")
+                test_qids_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qids_inpars_v2_compleja_dedup_test.txt")
             elif self.ds == "legal-inpars-v2-pregunta":
-                queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries_corta.tsv")
-                self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels_corta.tsv")
-                test_qids_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qids_inpars_v2_corta_test.txt")
+                queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries_pregunta_dedup.tsv")
+                self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels_pregunta_dedup.tsv")
+                test_qids_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qids_inpars_v2_pregunta_dedup_test.txt")
             elif self.ds == "legal-inpars-v2":
-                queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries.tsv")
-                self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels.tsv")
-                test_qids_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qids_inpars_v2_test.txt")
+                queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries_dedup.tsv")
+                self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels_dedup.tsv")
+                test_qids_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "qids_inpars_v2_dedup_test.txt")
             elif self.ds == "legal-synthetic":
                 queries_path = os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "consultas_sinteticas_380_filtered.tsv")
                 self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "qrels_synthetic_mistral-small-2501_filtered.tsv")
@@ -544,7 +544,8 @@ if __name__ == "__main__":
     # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_full_6x_summary_1024"
     # # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_full_6x"
     # # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_full_chunked_6x"
-    model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_6x_inpars_v2_corta_train"
+    # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_12x_inpars_v2_corta_dedup_train/checkpoint-600"
+    model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-train-v6"
     # # model_path = "/media/discoexterno/leon/legal_ir/results/legal_eos_full_synthetic/saved_model"
     # # model_path = "/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1_v4/checkpoint-4276"
     # # model = AutoModelForSequenceClassification.from_pretrained(model_path)
@@ -553,13 +554,13 @@ if __name__ == "__main__":
     # Evaluate IR metrics.
     evaluator = Evaluator(
         # ds="legal-54",
-        ds="legal-inpars-v2-corta",
-        model_name="bge",
+        ds="legal-54",
+        model_name="bm25",
         # metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
         metric_names={'ndcg_cut.10', 'recall_10', 'recall_100', 'recall_1000'},
         # metric_names={'recall_100'},
         # model_instance=model,
-        # checkpoint=model_path,
+        checkpoint=model_path,
         rerank=False,
         # reranker_model=reranker_model,
         # tokenizer=tokenizer,

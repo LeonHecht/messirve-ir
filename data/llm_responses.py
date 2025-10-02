@@ -865,16 +865,97 @@ def filter_qrels_by_deduped_queries(dedup_queries_path, qrels_path, out_path):
     print(f"[✓] Written filtered qrels to {out_path}")
 
 
+from typing import Optional
+import random
+
+def filter_inpars_v2_with_extra(
+    in_queries: str,
+    in_qrels: str,
+    out_queries: str,
+    out_qrels: str,
+    extra_ratio: float = 1.0,   # add this fraction of non-penal qids relative to penal count
+    seed: Optional[int] = 42,
+):
+    """
+    Keep all penal qids (base id in penal corpus), and add a random sample of
+    non-penal qids equal to round(len(penal_qids) * extra_ratio).
+
+    Assumes `in_queries` is TSV: qid \t query
+            `in_qrels`   is TSV: qid \t run \t doc_id \t label
+    """
+    if seed is not None:
+        random.seed(seed)
+
+    # 1) Penal corpus doc_ids (base ids)
+    penal_doc_ids, _ = get_legal_dataset(
+        os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "corpus.jsonl")
+    )
+    penal_doc_ids = set(map(str, penal_doc_ids))
+
+    # 2) Load queries & qrels
+    df_queries = pd.read_csv(in_queries, sep="\t", names=["qid", "query"], dtype=str)
+    df_qrels   = pd.read_csv(in_qrels,   sep="\t", names=["qid", "run", "doc_id", "label"], dtype=str)
+
+    # 3) Split qids into penal vs non-penal by base id (before first "_")
+    def base_id(qid: str) -> str:
+        return qid.split("_", 1)[0]
+
+    all_qids = set(df_queries["qid"].tolist())
+    penal_qids = {qid for qid in all_qids if base_id(qid) in penal_doc_ids}
+    nonpenal_qids = list(all_qids - penal_qids)  # list for sampling
+
+    # 4) Decide how many non-penal to add
+    add_n = int(round(len(penal_qids) * float(extra_ratio)))
+    add_n = max(0, min(add_n, len(nonpenal_qids)))  # clamp
+
+    # 5) Sample non-penal qids that actually exist in both queries *and* qrels (safer)
+    nonpenal_qids_with_qrels = list(set(nonpenal_qids) & set(df_qrels["qid"].tolist()))
+    if add_n > len(nonpenal_qids_with_qrels):
+        add_n = len(nonpenal_qids_with_qrels)
+    extra_qids = set(random.sample(nonpenal_qids_with_qrels, add_n)) if add_n > 0 else set()
+
+    # 6) Final keep set
+    keep_qids = penal_qids | extra_qids
+
+    # 7) Filter frames
+    df_queries_out = df_queries[df_queries["qid"].isin(keep_qids)]
+    df_qrels_out   = df_qrels[df_qrels["qid"].isin(keep_qids)]
+
+    # (Optional) If you also want to ensure qrels doc_ids are inside penal corpus, uncomment:
+    # df_qrels_out = df_qrels_out[df_qrels_out["doc_id"].isin(penal_doc_ids)]
+
+    # 8) Log stats
+    print(f"Penal qids: {len(penal_qids)}")
+    print(f"Non-penal available: {len(nonpenal_qids)}  | sampled: {len(extra_qids)} (ratio={extra_ratio})")
+    print(f"→ Final queries: {len(df_queries_out)} / {len(df_queries)}")
+    print(f"→ Final qrels:   {len(df_qrels_out)} / {len(df_qrels)}")
+
+    # 9) Save
+    df_queries_out.to_csv(out_queries, sep="\t", index=False, header=False)
+    print(f"[✓] Written filtered queries to {out_queries}")
+    df_qrels_out.to_csv(out_qrels, sep="\t", index=False, header=False)
+    print(f"[✓] Written filtered qrels to {out_qrels}")
+
+
+
 if __name__ == "__main__":
     # dedup_inpars_queries(
     #     os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries.tsv"),
     #     os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries_dedup.tsv")
     # )
 
-    filter_qrels_by_deduped_queries(
-        dedup_queries_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries_dedup.tsv"),
-        qrels_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels.tsv"),
-        out_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels_dedup.tsv")
+    # filter_qrels_by_deduped_queries(
+    #     dedup_queries_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries_dedup.tsv"),
+    #     qrels_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels.tsv"),
+    #     out_path=os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels_dedup.tsv")
+    # )
+
+    filter_inpars_v2_with_extra(
+        in_queries=os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries_corta_dedup.tsv"),
+        in_qrels=os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels_corta_dedup.tsv"),
+        out_queries=os.path.join(STORAGE_DIR, "legal_ir", "data", "corpus", "mistral_inpars_v2_corpus_NEW_queries_corta_dedup_penal_mixed_1-1.tsv"),
+        out_qrels=os.path.join(STORAGE_DIR, "legal_ir", "data", "annotations", "mistral_inpars_v2_corpus_NEW_qrels_corta_dedup_penal_mixed_1-1.tsv"),
+        extra_ratio=1.0
     )
 
     # requests = create_jsonl_original_annotation_mistral()

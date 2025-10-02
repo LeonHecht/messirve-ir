@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 from datasets import load_from_disk
 import random
 import json
@@ -31,12 +31,12 @@ def finetune():
     
     # train_ds_path = "bce_6x_summary_1024_baai.jsonl"
     # train_ds_path = "bce_6x_inpars_synthetic_baai.jsonl"
-    train_ds_path = "bge_finetune_12x_inpars_v2_corta_dedup_train_baai.jsonl"
+    train_ds_path = "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_train_baai.jsonl"
     train_ds_path = os.path.join(base_dir, "datasets", "dual_encoder", train_ds_path)
 
     output_dir = os.path.join(STORAGE_DIR, "legal_ir", "results", "baai_finetuning")
 
-    run_name = "bge-train-v2"
+    run_name = "bge-train-v6"
 
     output_dir = os.path.join(output_dir, run_name)
 
@@ -59,14 +59,14 @@ def finetune():
     --output_dir {output_dir} \
     --overwrite_output_dir \
     --learning_rate 3e-6 \
-    --num_train_epochs 1 \
+    --num_train_epochs 5 \
     --per_device_train_batch_size 4 \
-    --gradient_accumulation_steps 16 \
+    --gradient_accumulation_steps 4 \
     --dataloader_drop_last True \
-    --warmup_ratio 0.2 \
+    --warmup_ratio 0.8 \
     --gradient_checkpointing \
     --logging_steps 1 \
-    --save_steps 200 \
+    --save_steps 100 \
     --negatives_cross_device \
     --temperature 0.05 \
     --sentence_pooling_method cls \
@@ -75,9 +75,9 @@ def finetune():
     --unified_finetuning False \
     --use_self_distill False \
     --fix_encoder False \
-    --max_grad_norm 0.5 \
+    --max_grad_norm 4.5 \
     --bf16 \
-    --save_total_limit 2 \
+    --save_total_limit 1 \
     > {run_name}.log 2>&1 &
 """
     # --self_distill_start_step 0 \

@@ -735,12 +735,12 @@ def main_create_scenario_datasets():
     """
     base = Path(STORAGE_DIR) / "legal_ir" / "data"
     # ann  = base / "annotations" / "qrels_54.tsv"
-    ann  = base / "annotations" / "mistral_inpars_v2_corpus_NEW_qrels_dedup.tsv"
+    ann  = base / "annotations" / "mistral_inpars_v2_corpus_NEW_qrels_corta_dedup_penal_mixed_1-1.tsv"
     # ann  = base / "annotations" / "inpars_mistral-small-2501_qrels_Q1.tsv"
     # corp = base / "corpus" / "corpus.jsonl"
     corp = base / "corpus" / "corpus_NEW.jsonl"
     # qry  = base / "corpus" / "queries_54.tsv"
-    qry  = base / "corpus" / "mistral_inpars_v2_corpus_NEW_queries_dedup.tsv"
+    qry  = base / "corpus" / "mistral_inpars_v2_corpus_NEW_queries_corta_dedup_penal_mixed_1-1.tsv"
     out  = base / "datasets" / "dual_encoder"
     out.mkdir(parents=True, exist_ok=True)
 
@@ -749,9 +749,9 @@ def main_create_scenario_datasets():
     # train_qids = load_qids(base / "qids_train.txt")
     # dev_qids   = load_qids(base / "qids_dev.txt")
     # test_qids  = load_qids(base / "qids_test.txt")
-    train_qids = load_qids(base / "qids_inpars_v2_dedup_train.txt")
-    dev_qids   = load_qids(base / "qids_inpars_v2_dedup_dev.txt")
-    test_qids  = load_qids(base / "qids_inpars_v2_dedup_test.txt")
+    train_qids = load_qids(base / "qids_inpars_v2_corta_dedup_penal_mixed_1-1_train.txt")
+    dev_qids   = load_qids(base / "qids_inpars_v2_corta_dedup_penal_mixed_1-1_dev.txt")
+    test_qids  = load_qids(base / "qids_inpars_v2_corta_dedup_penal_mixed_1-1_test.txt")
     for split_name, qids in [("train", train_qids), ("dev", dev_qids), ("test", test_qids)]:
         # build_ce_dataset(
         #     qrels_path=str(ann),
@@ -783,7 +783,7 @@ def main_create_scenario_datasets():
             neg_labels=[0],
             corpus_path=str(corp),
             queries_path=str(qry),
-            output_path=str(out / f"bge_finetune_12x_inpars_v2_dedup_{split_name}.tsv"),
+            output_path=str(out / f"bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_{split_name}.tsv"),
             qid_filter=qids,
             neg_ratio=12,
             seed=seed,

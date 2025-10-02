@@ -3521,7 +3521,7 @@ def create_predictions_file(run, run_id="my_run"):
         Writes the results to a file named "predictions.tsv".
     """
     if len(run) > 10:
-        with open("predictions_BGE-m3.tsv", "w") as f:
+        with open("predictions_BM25_ds-54_corpus.tsv", "w") as f:
             for query_id, doc_scores in run.items():
                 # Sort documents by score in descending order and take top 10
                 sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:30]

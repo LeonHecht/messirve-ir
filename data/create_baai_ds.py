@@ -29,7 +29,7 @@ def convert_tsv_to_json_chunked(
     chunk_texts: Dict[str, str],
     output_path: str,
     prompt: str,
-    negatives_per_positive: int = 6,
+    negatives_per_positive: int = 12,
 ) -> None:
     """
     Convert a chunked TSV dataset (qid, chunk_id, label) to JSON lines format.
@@ -251,7 +251,7 @@ def build_baai_ds():
     corpus_dir = os.path.join(base_dir, "corpus")
     # query_path = os.path.join(corpus_dir, "consultas_sinteticas_380_filtered.tsv")
     # query_path = os.path.join(corpus_dir, "queries_54.tsv")
-    query_path = os.path.join(corpus_dir, "mistral_inpars_v2_corpus_NEW_queries_corta_dedup.tsv")
+    query_path = os.path.join(corpus_dir, "mistral_inpars_v2_corpus_NEW_queries_corta_dedup_penal_mixed_1-1.tsv")
     # corpus_path = os.path.join(corpus_dir, "corpus.jsonl")
     corpus_path = os.path.join(corpus_dir, "corpus_NEW.jsonl")
     # corpus_path = os.path.join(corpus_dir, "corpus_mistral_summaries_1024.jsonl")
@@ -271,14 +271,14 @@ def build_baai_ds():
     #     "bce_6x_summary_1024_test_baai.jsonl",
     # ]
     in_paths = [
-        "bge_finetune_12x_inpars_v2_corta_dedup_train.tsv",
-        "bge_finetune_12x_inpars_v2_corta_dedup_dev.tsv",
-        "bge_finetune_12x_inpars_v2_corta_dedup_test.tsv"
+        "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_train.tsv",
+        "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_dev.tsv",
+        "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_test.tsv"
     ]
     out_paths = [
-        "bge_finetune_12x_inpars_v2_corta_dedup_train_baai.jsonl",
-        "bge_finetune_12x_inpars_v2_corta_dedup_dev_baai.jsonl",
-        "bge_finetune_12x_inpars_v2_corta_dedup_test_baai.jsonl",
+        "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_train_baai.jsonl",
+        "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_dev_baai.jsonl",
+        "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_test_baai.jsonl",
     ]
 
     chunked = False
@@ -306,6 +306,7 @@ def build_baai_ds():
             doc_dict,
             os.path.join(base_dir, "datasets", "dual_encoder", out_path),
             prompt="",
+            negatives_per_positive=12,
         )
 
 
@@ -386,8 +387,25 @@ def build_baai_eval_ds(query_path, corpus_path, qrels_path,
     print("Done building BAAI eval dataset")
 
 
+import shutil
+
+def append_jsonl(src_file, dst_file):
+    """
+    Append all lines from src_file.jsonl to dst_file.jsonl.
+    """
+    with open(src_file, "r", encoding="utf-8") as src, \
+         open(dst_file, "a", encoding="utf-8") as dst:
+        shutil.copyfileobj(src, dst)
+
+    print(f"[✓] Appended {src_file} → {dst_file}")
+
+
 if __name__ == "__main__":
-    build_baai_ds()
+    # build_baai_ds()
+    append_jsonl(
+        src_file=os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_dev_baai.jsonl"),
+        dst_file=os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_train_baai.jsonl")
+    )
 
     # # in paths
     # base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
