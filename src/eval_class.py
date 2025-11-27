@@ -545,7 +545,7 @@ if __name__ == "__main__":
     # # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_full_6x"
     # # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_full_chunked_6x"
     # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_12x_inpars_v2_corta_dedup_train/checkpoint-600"
-    model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-train-v6"
+    # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-train-v6"
     # # model_path = "/media/discoexterno/leon/legal_ir/results/legal_eos_full_synthetic/saved_model"
     # # model_path = "/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1_v4/checkpoint-4276"
     # # model = AutoModelForSequenceClassification.from_pretrained(model_path)
@@ -557,10 +557,10 @@ if __name__ == "__main__":
         ds="legal-54",
         model_name="bm25",
         # metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
-        metric_names={'ndcg_cut.10', 'recall_10', 'recall_100', 'recall_1000'},
+        metric_names={'ndcg_cut.1', 'ndcg_cut.3', 'ndcg_cut.5', 'ndcg_cut.10', 'recall_1', 'ndcg_cut.3', 'recall_5', 'ndcg_cut.10'},
         # metric_names={'recall_100'},
         # model_instance=model,
-        checkpoint=model_path,
+        # checkpoint=model_path,
         rerank=False,
         # reranker_model=reranker_model,
         # tokenizer=tokenizer,
