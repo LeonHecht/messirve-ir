@@ -3542,6 +3542,77 @@ def create_predictions_file(run, run_id="my_run"):
                         # Write in TREC format: query_id, Q0, doc_id, rank, score, run_id
                         f.write(f"{query_id}\tQ0\t{doc_id}\t{rank}\t{score:.4f}\t{run_id}\n")
         return out_paths
+
+
+def create_predictions_file_mt_rag(run, collection: str, run_id="my_run"):
+    """
+    Generates a MTRAG-formatted predictions file from the run dictionary.
+
+    The run dictionary has the following structure:
+        {
+            str(query_id): {str(doc_id): float(score), ...},
+            ...
+        }
+    
+    The MTRAG format for a result is:
+        {
+            "task_id": str(task_id), "Collection": str(collection), "contexts"=[{"document_id": str(doc_id), "score": float(score)}, ...],
+            ...
+        }
+        
+    Parameters
+    ----------
+    run : dict
+        Dictionary mapping query IDs to dictionaries of document IDs and their scores.
+    run_id : str, optional
+        Identifier for the run (default is "my_run").
+    
+    Returns
+    -------
+    None
+        Writes the results to a file named "predictions.jsonl".
+    """
+    import json
+    if len(run) > 10:
+        with open(f"predictions_{run_id}.jsonl", "w") as f:
+            # query_id = task_id
+            for query_id, doc_scores in run.items():
+                json_out = {}
+                # Sort documents by score in descending order and take top 30
+                sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:30]
+                json_out["task_id"] = query_id
+                json_out["Collection"] = collection
+                json_out["contexts"] = []
+                for rank, (doc_id, score) in enumerate(sorted_docs, start=1):
+                    context_obj = {
+                        "document_id": doc_id,
+                        "score": score
+                    }
+                    json_out["contexts"].append(context_obj)
+                f.write(json.dumps(json_out) + "\n")
+        return f"predictions{run_id}.jsonl"
+    else:
+        out_paths = []
+        for type_, type_run in run.items():
+            out_path = f"predictions_{run_id}_{type_}.tsv"
+            out_paths.append(out_path)
+            with open(f"predictions_{run_id}_{type_}.jsonl", "w") as f:
+                # query_id = task_id
+                for query_id, doc_scores in type_run.items():
+                    json_out = {}
+                    # Sort documents by score in descending order and take top 30
+                    sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)[:30]
+                    json_out["task_id"] = query_id
+                    json_out["Collection"] = collection
+                    json_out["contexts"] = []
+                    for rank, (doc_id, score) in enumerate(sorted_docs, start=1):
+                        context_obj = {
+                            "document_id": doc_id,
+                            "score": score
+                        }
+                        json_out["contexts"].append(context_obj)
+                    f.write(json.dumps(json_out) + "\n")
+        return out_paths
     
 
 import re
@@ -3709,6 +3780,18 @@ def get_legal_queries(path):
     # convert topic_id column to list
     df["id"] = df["id"].astype(str)
     return df["id"].tolist(), df["query"].tolist()
+
+def get_mtrag_queries(path):
+    if not path.endswith(".jsonl"):
+        raise ValueError("Path must end with .jsonl")
+    ids = []
+    queries = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            ids.append(str(obj["_id"]))
+            queries.append(str(obj["text"]))
+    return ids, queries
 
 
 def embed_colbert(model, docs, queries, doc_ids, query_ids):

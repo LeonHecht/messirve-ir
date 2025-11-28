@@ -39,7 +39,9 @@ from src.utils.retrieval_utils import (
     get_legal_dataset,
     get_legal_dataset_norm,
     get_legal_queries,
+    get_mtrag_queries,
     create_predictions_file,
+    create_predictions_file_mt_rag,
     embed_chunkwise,
     get_sim_bge,
     chunk_by_paragraphs,
@@ -91,7 +93,7 @@ class Evaluator:
         reranker_model : object, optional
             Reranker model instance.
     """
-    def __init__(self, ds, model_name, metric_names, limit=None, reuse_run=False, model_instance=None, rerank=False, tokenizer=None, reranker_model=None, reranker_model_type=None, max_length=-1, rerank_chunkwise=False, checkpoint=None):
+    def __init__(self, ds, model_name, metric_names, limit=None, reuse_run=False, model_instance=None, rerank=False, tokenizer=None, reranker_model=None, reranker_model_type=None, max_length=-1, rerank_chunkwise=False, checkpoint=None, mt_collection=None, mt_corpus_name=None):
         self.ds = ds
         self.model_name = model_name
         self.metric_names = metric_names
@@ -114,6 +116,10 @@ class Evaluator:
         self.qrels_dev_df = None
         self.run = None
         self.path_to_reference_qrels = None
+
+        # For MTRAG
+        self.mt_collection = mt_collection
+        self.mt_corpus_name = mt_corpus_name
 
     def load_data(self):
         if self.ds == "msmarco":
@@ -241,6 +247,35 @@ class Evaluator:
 
             # create a dictionary of query_id to query
             self.query_dict = {query_id: query for query_id, query in zip(self.query_ids, self.queries)}
+    
+        elif self.ds == "mtrag":
+
+            q_type = "lastturn"
+            # q_type = "rewrite"
+            
+            # load corpus
+            self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "mtrag", "data", "corpus", f"{self.mt_corpus_name}.jsonl"))
+            self.doc_dict = {doc_id: doc for doc_id, doc in zip(self.doc_ids, self.docs)}
+
+            # load queries
+            queries_path = os.path.join(STORAGE_DIR, "mtrag", "data", "questions", f"{self.mt_corpus_name}_{q_type}.jsonl")
+            self.query_ids, self.queries = get_mtrag_queries(queries_path)
+            # create a dictionary of query_id to query
+            self.query_dict = {query_id: query for query_id, query in zip(self.query_ids, self.queries)}
+
+            # load qrels
+            # query-id	corpus-id	score
+            self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "mtrag", "data", "annotations", f"{self.mt_corpus_name}_qrels.tsv")
+            test_qids_path = None
+
+            self.qrels_dev_df = pd.read_csv(
+                self.path_to_reference_qrels,
+                sep="\t",                # TREC qrels are usually tab-separated
+                names=["query_id", "doc_id", "relevance"],
+                header=0,            # There's no header in qrels files
+                dtype={"query_id": str, "doc_id": str, "relevance": int}
+            )
+
         else:
             raise ValueError("Dataset not supported.")
         print("Data prepared.")
@@ -282,10 +317,10 @@ class Evaluator:
                                             get_bge_m3_model('BAAI/bge-m3') if self.checkpoint is None else get_bge_m3_model(self.checkpoint),
                                             self.doc_dict, self.doc_ids,
                                             self.queries, self.query_ids,
-                                            MAX_QUERY_LEN=48,
-                                            MAX_DOC_LEN_DENSE=4096,
-                                            MAX_DOC_LEN_SPARSE=4096,
-                                            MAX_DOC_LEN_COLBERT=4096,   # ColBERT shorter to save RAM/VRAM
+                                            MAX_QUERY_LEN=96,
+                                            MAX_DOC_LEN_DENSE=512,
+                                            MAX_DOC_LEN_SPARSE=512,
+                                            MAX_DOC_LEN_COLBERT=512,   # ColBERT shorter to save RAM/VRAM
                                             SHARD_DENSE=1500,
                                             SHARD_SPARSE=1500,
                                             SHARD_COLBERT=800,
@@ -369,14 +404,24 @@ class Evaluator:
         print(f"Intersection:  {len(run_qids & ref_qids)}")
         self.metrics = get_eval_metrics(self.run, self.qrels_dev_df, self.doc_ids, self.metric_names)
         result_paths = create_results_file(self.run)
-        prediction_paths = create_predictions_file(self.run)   # create TREC style qrel file (contains same info as results.txt)
-        if type(result_paths) == str:
-            msmarco_eval_ranking.main(self.path_to_reference_qrels, [result_paths])
-        elif type(result_paths) == list:
-            msmarco_eval_ranking.main(self.path_to_reference_qrels, result_paths)
-        else:
-            raise Exception("Invalid result paths")
-
+        # prediction_paths = create_predictions_file(self.run)   # create TREC style qrel file (contains same info as results.txt)
+        
+        # MT RAG Collections:
+        # mt-rag-clapnq-elser-512-100-20240503
+        # mt-rag-govt-elser-512-100-20240611
+        # mt-rag-fiqa-beir-elser-512-100-20240501
+        # mt-rag-ibmcloud-elser-512-100-20240502
+        
+        prediction_paths = create_predictions_file_mt_rag(self.run, collection=self.mt_collection, run_id=f"{self.mt_collection}-bm25")   # create MTRAG style qrel file (contains same info as results.txt)
+        try:
+            if type(result_paths) == str:
+                msmarco_eval_ranking.main(self.path_to_reference_qrels, [result_paths])
+            elif type(result_paths) == list:
+                msmarco_eval_ranking.main(self.path_to_reference_qrels, result_paths)
+            else:
+                raise Exception("Invalid result paths")
+        except:
+            pass
 
     def create_run_df(self, run, top_k=5):
         """
@@ -515,6 +560,17 @@ def get_messirve_corpus(country):
 
 #     evaluator.evaluate()
 
+def join_jsonl_files(out_path, *input_paths):
+    """
+    Concatenates multiple JSONL files into a single output JSONL file.
+    """
+    with open(out_path, "w", encoding="utf-8") as out_f:
+        for path in input_paths:
+            with open(path, "r", encoding="utf-8") as in_f:
+                for line in in_f:
+                    if line.strip():        # skip empty lines
+                        out_f.write(line)
+
 
 if __name__ == "__main__":
     # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_2048/checkpoint-320")
@@ -551,24 +607,47 @@ if __name__ == "__main__":
     # # model = AutoModelForSequenceClassification.from_pretrained(model_path)
     # # tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-    # Evaluate IR metrics.
-    evaluator = Evaluator(
-        # ds="legal-54",
-        ds="legal-54",
-        model_name="bm25",
-        # metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
-        metric_names={'ndcg_cut.1', 'ndcg_cut.3', 'ndcg_cut.5', 'ndcg_cut.10', 'recall_1', 'ndcg_cut.3', 'recall_5', 'ndcg_cut.10'},
-        # metric_names={'recall_100'},
-        # model_instance=model,
-        # checkpoint=model_path,
-        rerank=False,
-        # reranker_model=reranker_model,
-        # tokenizer=tokenizer,
-        # max_length=512,
-        # rerank_chunkwise=True,
-        # reranker_model_type="sbert"
-    )
-    evaluator.evaluate()
+    collections = {
+        "mt-rag-clapnq-elser-512-100-20240503": "clapnq",
+        "mt-rag-govt-elser-512-100-20240611": "govt",
+        "mt-rag-fiqa-beir-elser-512-100-20240501": "fiqa",
+        "mt-rag-ibmcloud-elser-512-100-20240502": "cloud",
+    }
+
+    model = "bge-sparse-streamed"
+
+    for collection in collections:
+        print("Evaluación para", collection)
+        # Evaluate IR metrics.
+        evaluator = Evaluator(
+            # ds="legal-54",
+            ds="mtrag",
+            model_name=model,
+            # metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
+            metric_names={'ndcg_cut.10', 'recall_10'},
+            # metric_names={'recall_100'},
+            # model_instance=model,
+            # checkpoint=model_path,
+            rerank=False,
+            # reranker_model=reranker_model,
+            # tokenizer=tokenizer,
+            # max_length=512,
+            # rerank_chunkwise=True,
+            # reranker_model_type="sbert"
+            mt_collection=collection,
+            mt_corpus_name=collections[collection]
+        )
+        evaluator.evaluate()
+
+    # prediction_paths = [f"predictions_{collection}-{model}.jsonl" for collection in collections]
+
+    # join_jsonl_files(
+    #     "mtrag_predictions_bge-all_three.jsonl",
+    #     prediction_paths[0],
+    #     prediction_paths[1],
+    #     prediction_paths[2],
+    #     prediction_paths[3],
+    # )
 
     # main()
     # model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2")
