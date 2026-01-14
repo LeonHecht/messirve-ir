@@ -19,7 +19,7 @@ def configure_python_path():
 configure_python_path()
 
 from config.config import STORAGE_DIR
-from src.utils.retrieval_utils import get_legal_dataset, get_legal_queries
+from src.utils.retrieval_utils import get_legal_dataset, get_legal_queries, get_mtrag_queries
 
 
 def convert_tsv_to_json_chunked(
@@ -247,16 +247,16 @@ def chunk_text(
 
 
 def build_baai_ds():
-    base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
+    base_dir = os.path.join(STORAGE_DIR, "mtrag", "data")
     corpus_dir = os.path.join(base_dir, "corpus")
     # query_path = os.path.join(corpus_dir, "consultas_sinteticas_380_filtered.tsv")
     # query_path = os.path.join(corpus_dir, "queries_54.tsv")
-    query_path = os.path.join(corpus_dir, "mistral_inpars_v2_corpus_NEW_queries_corta_dedup_penal_mixed_1-1.tsv")
+    query_path = os.path.join(base_dir, "questions", "all_queries_rewrite.jsonl")
     # corpus_path = os.path.join(corpus_dir, "corpus.jsonl")
-    corpus_path = os.path.join(corpus_dir, "corpus_NEW.jsonl")
+    corpus_path = os.path.join(corpus_dir, "all_corpus.jsonl")
     # corpus_path = os.path.join(corpus_dir, "corpus_mistral_summaries_1024.jsonl")
 
-    qids, queries = get_legal_queries(query_path)
+    qids, queries = get_mtrag_queries(query_path)
     dids, docs = get_legal_dataset(corpus_path)
     doc_dict = dict(zip(dids, docs))
 
@@ -271,14 +271,15 @@ def build_baai_ds():
     #     "bce_6x_summary_1024_test_baai.jsonl",
     # ]
     in_paths = [
-        "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_train.tsv",
-        "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_dev.tsv",
-        "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_test.tsv"
+        "bge_finetune_6x_all_train.tsv",
+        "bge_finetune_6x_all_dev.tsv",
+        "bge_finetune_6x_all_test.tsv"
     ]
+
     out_paths = [
-        "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_train_baai.jsonl",
-        "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_dev_baai.jsonl",
-        "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_test_baai.jsonl",
+        "bge_finetune_6x_all_train_baai.jsonl",
+        "bge_finetune_6x_all_dev_baai.jsonl",
+        "bge_finetune_6x_all_test_baai.jsonl",
     ]
 
     chunked = False
@@ -306,7 +307,7 @@ def build_baai_ds():
             doc_dict,
             os.path.join(base_dir, "datasets", "dual_encoder", out_path),
             prompt="",
-            negatives_per_positive=12,
+            negatives_per_positive=6,
         )
 
 
@@ -402,26 +403,24 @@ def append_jsonl(src_file, dst_file):
 
 if __name__ == "__main__":
     # build_baai_ds()
-    append_jsonl(
-        src_file=os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_dev_baai.jsonl"),
-        dst_file=os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_train_baai.jsonl")
-    )
+    # append_jsonl(
+    #     src_file=os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_dev_baai.jsonl"),
+    #     dst_file=os.path.join(STORAGE_DIR, "legal_ir", "data", "datasets", "dual_encoder", "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_train_baai.jsonl")
+    # )
 
-    # # in paths
-    # base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
-    # corpus_dir = os.path.join(base_dir, "corpus")
-    # # query_path = os.path.join(corpus_dir, "inpars_mistral-small-2501_queries.tsv")
-    # query_path = os.path.join(corpus_dir, "queries_57.csv")
-    # corpus_path = os.path.join(corpus_dir, "corpus_py.csv")
-    # # qrels_path = os.path.join(base_dir, "datasets", "cross_encoder", "bce_6x_inpars_test.tsv")
-    # qrels_path = os.path.join(base_dir, "annotations", "qrels_py.tsv")
+    # in paths
+    base_dir = os.path.join(STORAGE_DIR, "mtrag", "data")
+    corpus_dir = os.path.join(base_dir, "corpus")
+    # query_path = os.path.join(corpus_dir, "inpars_mistral-small-2501_queries.tsv")
+    query_path = os.path.join(base_dir, "questions", "all_queries_rewrite.jsonl")
+    corpus_path = os.path.join(corpus_dir, "all_corpus.jsonl")
+    # qrels_path = os.path.join(base_dir, "datasets", "cross_encoder", "bce_6x_inpars_test.tsv")
+    qrels_path = os.path.join(base_dir, "annotations", "all_qrels.tsv")
     
-    # # out paths
-    # baai_dir = os.path.join(base_dir, "baai_57")
-    # baai_corpus_path = os.path.join(baai_dir, "corpus.jsonl")
-    # baai_queries_path = os.path.join(baai_dir, "test_queries.jsonl")
-    # baai_qrels_path = os.path.join(baai_dir, "test_qrels.jsonl")
+    # out paths
+    baai_dir = os.path.join(base_dir, "baai_57")
+    baai_corpus_path = os.path.join(baai_dir, "corpus.jsonl")
+    baai_queries_path = os.path.join(baai_dir, "test_queries.jsonl")
+    baai_qrels_path = os.path.join(baai_dir, "test_qrels.jsonl")
 
-    # build_baai_eval_ds(query_path, corpus_path, qrels_path,
-    #                    baai_corpus_path, baai_queries_path, baai_qrels_path,
-    #                    qrel_num_cols=4, relevance_range=[2, 3])
+    build_baai_ds()

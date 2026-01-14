@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import torch
 import pandas as pd
 import sys
@@ -34,6 +34,7 @@ from src.utils.retrieval_utils import (
     embed_s_transformers_faiss,
     rerank_cross_encoder,
     embed_qwen,
+    embed_cohere,
     get_eval_metrics,
     create_results_file,
     get_legal_dataset,
@@ -250,23 +251,20 @@ class Evaluator:
     
         elif self.ds == "mtrag":
 
-            q_type = "lastturn"
-            # q_type = "rewrite"
+            # q_type = "lastturn"
+            self.mt_q_type = "rewrite"
             
             # load corpus
             self.doc_ids, self.docs = get_legal_dataset(os.path.join(STORAGE_DIR, "mtrag", "data", "corpus", f"{self.mt_corpus_name}.jsonl"))
             self.doc_dict = {doc_id: doc for doc_id, doc in zip(self.doc_ids, self.docs)}
 
-            # load queries
-            queries_path = os.path.join(STORAGE_DIR, "mtrag", "data", "questions", f"{self.mt_corpus_name}_{q_type}.jsonl")
-            self.query_ids, self.queries = get_mtrag_queries(queries_path)
-            # create a dictionary of query_id to query
-            self.query_dict = {query_id: query for query_id, query in zip(self.query_ids, self.queries)}
-
             # load qrels
             # query-id	corpus-id	score
             self.path_to_reference_qrels = os.path.join(STORAGE_DIR, "mtrag", "data", "annotations", f"{self.mt_corpus_name}_qrels.tsv")
-            test_qids_path = None
+
+            # load queries
+            queries_path = os.path.join(STORAGE_DIR, "mtrag", "data", "questions", f"{self.mt_corpus_name}_{self.mt_q_type}.jsonl")
+            self.query_ids, self.queries = get_mtrag_queries(queries_path)
 
             self.qrels_dev_df = pd.read_csv(
                 self.path_to_reference_qrels,
@@ -275,6 +273,35 @@ class Evaluator:
                 header=0,            # There's no header in qrels files
                 dtype={"query_id": str, "doc_id": str, "relevance": int}
             )
+
+            # test_qids_path = os.path.join(STORAGE_DIR, "mtrag", "data", "qids_all_dev_test.txt")
+            test_qids_path = None
+            
+            if test_qids_path is not None:
+                with open(test_qids_path, "r") as f:
+                    test_qids = f.readlines()
+                test_qids = [qid.strip() for qid in test_qids]
+
+                # filter queries and query_ids to only include the ones in the test set
+                self.queries = [query for query_id, query in zip(self.query_ids, self.queries) if query_id in test_qids]
+                self.query_ids = [query_id for query_id in self.query_ids if query_id in test_qids]
+
+                # filter qrels to only include the ones in the test set
+                self.qrels_dev_df = self.qrels_dev_df[self.qrels_dev_df["query_id"].isin(test_qids)]
+
+                # Right after filtering qrels_dev_df:
+                filtered_qrels_path = os.path.join(STORAGE_DIR,
+                    "legal_ir", "data", "annotations", f"{self.ds}_qrels_test.tsv")
+                self.qrels_dev_df.to_csv(
+                    filtered_qrels_path,
+                    sep="\t",
+                    header=False,
+                    index=False
+                )
+                self.path_to_reference_qrels = filtered_qrels_path
+
+            # create a dictionary of query_id to query
+            self.query_dict = {query_id: query for query_id, query in zip(self.query_ids, self.queries)}
 
         else:
             raise ValueError("Dataset not supported.")
@@ -298,12 +325,18 @@ class Evaluator:
         """
         Retrieves or computes the run based on the model name.
         """
+        path_docs = os.path.join(STORAGE_DIR, f'mtrag/data/corpus/embeddings/cohere_doc_embeds_{self.mt_corpus_name}.npy')
+
         # Mapping of model names to their respective computation lambdas.
         model_mapping = {
             "bm25": lambda: retrieve_bm25(self.docs, self.queries, self.doc_ids, self.query_ids),
             "bge-sliding": lambda: embed_bge_sliding_window(
                 get_bge_m3_model('BAAI/bge-m3') if self.checkpoint is None else get_bge_m3_model(self.checkpoint),
                 self.doc_dict, self.query_dict, self.reuse_run
+            ),
+            "cohere": lambda: embed_cohere(
+                self.docs, self.queries, self.doc_ids, self.query_ids,
+                path_docs=path_docs, reuse_run=True
             ),
             "bge": lambda: embed_bge(
                 get_bge_m3_model('BAAI/bge-m3') if self.checkpoint is None else get_bge_m3_model(self.checkpoint),
@@ -389,10 +422,10 @@ class Evaluator:
         # self.write_run_to_tsv(qid="1", out_path="run_Q1_before.tsv")
         # for each query rerank the top 100 docs
         if self.rerank_chunkwise:
-            self.run = rerank_cross_encoder_chunked(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 50, self.query_dict, self.doc_dict,
+            self.run = rerank_cross_encoder_chunked(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 100, self.query_dict, self.doc_dict,
                                                     max_length=self.max_length, stride=self.max_length//2, aggregator="top3")
         else:
-            self.run = rerank_cross_encoder(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 50, self.query_dict, self.doc_dict,
+            self.run = rerank_cross_encoder(self.reranker_model, self.reranker_model_type, self.tokenizer, self.run, 100, self.query_dict, self.doc_dict,
                                     max_length=self.max_length)
         # self.write_run_to_tsv(qid="1", out_path="run_Q1_after.tsv")
 
@@ -412,7 +445,7 @@ class Evaluator:
         # mt-rag-fiqa-beir-elser-512-100-20240501
         # mt-rag-ibmcloud-elser-512-100-20240502
         
-        prediction_paths = create_predictions_file_mt_rag(self.run, collection=self.mt_collection, run_id=f"{self.mt_collection}-bm25")   # create MTRAG style qrel file (contains same info as results.txt)
+        prediction_paths = create_predictions_file_mt_rag(self.run, collection=self.mt_collection, run_id=f"{self.mt_collection}-{self.model_name}-{self.mt_q_type}")   # create MTRAG style qrel file (contains same info as results.txt)
         try:
             if type(result_paths) == str:
                 msmarco_eval_ranking.main(self.path_to_reference_qrels, [result_paths])
@@ -588,14 +621,15 @@ if __name__ == "__main__":
     #             )
     # evaluator.evaluate()
 
-    # from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
     # reranker_model = AutoModelForSequenceClassification.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1_v5")
     # tokenizer = AutoTokenizer.from_pretrained("/media/discoexterno/leon/legal_ir/results/cross_encoder_weighted_stride_inpars_Q1_v5")
-    # reranker_model = AutoModelForSequenceClassification.from_pretrained("cross-encoder/mmarco-mMiniLMv2-L12-H384-v1")
-    # tokenizer = AutoTokenizer.from_pretrained("cross-encoder/mmarco-mMiniLMv2-L12-H384-v1")
+    reranker_model = AutoModelForSequenceClassification.from_pretrained("cross-encoder/mmarco-mMiniLMv2-L12-H384-v1")
+    tokenizer = AutoTokenizer.from_pretrained("cross-encoder/mmarco-mMiniLMv2-L12-H384-v1")
 
     # # model_path = "dariolopez/bge-m3-es-legal-tmp-6"
     # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_6x_54_multi_epoch"
+    model_path = "/media/discoexterno/leon/mtrag/results/baai_finetuning/bge-train-v6"
     # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_6x_54_summary_1024"
     # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_full_6x_summary_1024"
     # # model_path = "/media/discoexterno/leon/legal_ir/results/baai_finetuning/bge-m3_full_6x"
@@ -614,7 +648,8 @@ if __name__ == "__main__":
         "mt-rag-ibmcloud-elser-512-100-20240502": "cloud",
     }
 
-    model = "bge-sparse-streamed"
+    # variant = "all_three"
+    model = "cohere"
 
     for collection in collections:
         print("Evaluación para", collection)
@@ -623,17 +658,18 @@ if __name__ == "__main__":
             # ds="legal-54",
             ds="mtrag",
             model_name=model,
+            # checkpoint="/media/discoexterno/leon/mtrag/results/baai_finetuning/bge-train-v6",
             # metric_names={'ndcg', 'ndcg_cut.10', 'recall_1000', 'recall_100', 'recall_10', 'recip_rank', 'map'},
             metric_names={'ndcg_cut.10', 'recall_10'},
             # metric_names={'recall_100'},
             # model_instance=model,
             # checkpoint=model_path,
-            rerank=False,
-            # reranker_model=reranker_model,
-            # tokenizer=tokenizer,
+            rerank=True,
+            reranker_model=reranker_model,
+            tokenizer=tokenizer,
             # max_length=512,
             # rerank_chunkwise=True,
-            # reranker_model_type="sbert"
+            reranker_model_type="bge",
             mt_collection=collection,
             mt_corpus_name=collections[collection]
         )
@@ -642,7 +678,8 @@ if __name__ == "__main__":
     # prediction_paths = [f"predictions_{collection}-{model}.jsonl" for collection in collections]
 
     # join_jsonl_files(
-    #     "mtrag_predictions_bge-all_three.jsonl",
+    #     # f"mtrag_predictions_bge-rewrite-{variant}.jsonl",
+    #     f"mtrag_predictions_{model}.jsonl",
     #     prediction_paths[0],
     #     prediction_paths[1],
     #     prediction_paths[2],

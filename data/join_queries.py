@@ -1,9 +1,19 @@
 import pandas as pd
 from pathlib import Path
 import sys
-sys.path.append("home/leon/tesis/messirve-ir")
-from config.config import STORAGE_DIR
+import os
 
+def configure_python_path():
+    project_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), os.pardir)
+    )
+    print(f"Adding {project_root} to sys.path")
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+configure_python_path()
+
+from config.config import STORAGE_DIR
 
 import pandas as pd
 from pathlib import Path
@@ -52,17 +62,40 @@ def merge_csv_files(file_paths, output_path, start_id=58):
     merged_df.to_csv(output_path, index=False)
 
 
+def merge_jsonl_files(file_paths, output_path):
+
+    with open(output_path, "w", encoding="utf-8") as fout:
+        for file in file_paths:
+            with open(file, "r", encoding="utf-8") as fin:
+                for line in fin:
+                    if line.strip():  # skip empty lines
+                        fout.write(line)
+
+    print(f"Merged {len(file_paths)} files into {output_path}")
+
 
 if __name__ == "__main__":
+    # # Define the paths to the CSV files
+    # file_paths = [
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "queries_150_GPT4.5.csv",
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "queries_150_GPT4o.csv",
+    #     Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "queries_150_GPTo3.csv"
+    # ]
+
+    # # Define the output path
+    # output_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "synthetic_queries2.csv"
+
+    # # Merge the CSV files
+    # merge_csv_files(file_paths, output_path)
+    
     # Define the paths to the CSV files
     file_paths = [
-        Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "queries_150_GPT4.5.csv",
-        Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "queries_150_GPT4o.csv",
-        Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "queries_150_GPTo3.csv"
+        Path(STORAGE_DIR) / "mtrag" / "data" / "datasets" / "dual_encoder" / "bge_finetune_6x_all_dev_baai.jsonl",
+        Path(STORAGE_DIR) / "mtrag" / "data" / "datasets" / "dual_encoder" / "bge_finetune_6x_all_test_baai.jsonl",
     ]
 
     # Define the output path
-    output_path = Path(STORAGE_DIR) / "legal_ir" / "data" / "corpus" / "synthetic_queries2.csv"
+    output_path = Path(STORAGE_DIR) / "mtrag" / "data" / "datasets" / "dual_encoder" / "bge_finetune_6x_all_dev_test_baai.jsonl"
 
     # Merge the CSV files
-    merge_csv_files(file_paths, output_path)
+    merge_jsonl_files(file_paths, output_path)

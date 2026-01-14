@@ -426,6 +426,125 @@ def embed_bge(model, docs, queries, doc_ids, query_ids, reuse_run):
     return run
 
 
+def embed_cohere(docs, queries, doc_ids, query_ids, reuse_run, path_docs, path_queries=None):
+    """
+    Embed docs + queries with Cohere (max 96 inputs per request), optionally reuse cached embeddings from disk,
+    and compute similarity + retrieval.
+
+    This mirrors your embed_bge pattern:
+      - docs embeddings are cached to `path_docs`
+      - query embeddings are computed fresh (unless you also pass `path_queries` and reuse_run=True)
+
+    Args:
+        docs (list[str]): corpus texts (len = N)
+        queries (list[str]): query texts (len = Q)
+        doc_ids (list[str]): doc ids aligned with docs
+        query_ids (list[str]): query ids aligned with queries
+        reuse_run (bool): if True and cached files exist, load from disk
+        path_docs (str): .npy path for doc embeddings (e.g., ".../cohere_docs.npy")
+        path_queries (str|None): optional .npy path for query embeddings
+
+    Returns:
+        run: output of retrieve(query_ids, doc_ids, similarity)
+    """
+    import os
+    import cohere
+    import numpy as np
+    import torch
+    from config.config import COHERE_API_KEY
+
+    MAX_BATCH = 96
+    MODEL = "embed-v4.0"
+    DIM = 1024
+
+    if len(docs) != len(doc_ids):
+        raise ValueError(f"docs and doc_ids must have same length. Got {len(docs)} and {len(doc_ids)}")
+    if len(queries) != len(query_ids):
+        raise ValueError(f"queries and query_ids must have same length. Got {len(queries)} and {len(query_ids)}")
+
+    os.makedirs(os.path.dirname(path_docs), exist_ok=True)
+    if path_queries is not None:
+        os.makedirs(os.path.dirname(path_queries), exist_ok=True)
+
+    co = cohere.ClientV2(api_key=COHERE_API_KEY)
+
+    def _to_embed_input(texts):
+        return [{"content": [{"type": "text", "text": t}]} for t in texts]
+
+    def _embed_in_batches(texts, input_type):
+        embs = []
+        for start in range(0, len(texts), MAX_BATCH):
+            batch = texts[start:start + MAX_BATCH]
+            resp = co.embed(
+                inputs=_to_embed_input(batch),
+                model=MODEL,
+                output_dimension=DIM,
+                input_type=input_type,
+                embedding_types=["float"],
+            )
+            embs.append(np.asarray(resp.embeddings.float, dtype=np.float32))
+
+            if len(texts) > MAX_BATCH:
+                print(
+                    f"\rEmbedding {input_type}: {min(start + MAX_BATCH, len(texts))}/{len(texts)}",
+                    end=""
+                )
+        if len(texts) > MAX_BATCH:
+            print()
+        return np.vstack(embs) if embs else np.empty((0, DIM), dtype=np.float32)
+
+    # ---- DOC EMBEDDINGS (cache like embed_bge) ----
+    if not os.path.exists(path_docs) or not reuse_run:
+        print("Embedding docs...")
+        doc_emb = _embed_in_batches(docs, input_type="search_document")
+        print("Docs embedded:", doc_emb.shape)
+
+        try:
+            print("Saving doc embeddings...", end="")
+            np.save(path_docs, doc_emb)
+            print("Done.")
+        except Exception as e:
+            print(f"\nCould not save doc embeddings to {path_docs}: {e}")
+    else:
+        print("Loading doc embeddings...")
+        doc_emb = np.load(path_docs)
+        if doc_emb.shape[0] != len(docs):
+            raise ValueError(
+                f"Loaded doc embeddings rows ({doc_emb.shape[0]}) != number of docs ({len(docs)}). "
+                f"Cache likely mismatched: {path_docs}"
+            )
+
+    # ---- QUERY EMBEDDINGS (fresh by default; optional cache) ----
+    if path_queries is not None and os.path.exists(path_queries) and reuse_run:
+        print("Loading query embeddings...")
+        query_emb = np.load(path_queries)
+        if query_emb.shape[0] != len(queries):
+            raise ValueError(
+                f"Loaded query embeddings rows ({query_emb.shape[0]}) != number of queries ({len(queries)}). "
+                f"Cache likely mismatched: {path_queries}"
+            )
+    else:
+        print("Embedding queries...")
+        query_emb = _embed_in_batches(queries, input_type="search_query")
+        print("Queries embedded:", query_emb.shape)
+
+        if path_queries is not None:
+            try:
+                print("Saving query embeddings...", end="")
+                np.save(path_queries, query_emb)
+                print("Done.")
+            except Exception as e:
+                print(f"\nCould not save query embeddings to {path_queries}: {e}")
+
+    # ---- Similarity + retrieval ----
+    similarity = compute_similarity(
+        torch.tensor(query_emb, dtype=torch.float32),
+        torch.tensor(doc_emb, dtype=torch.float32)
+    )
+    run = retrieve(query_ids, doc_ids, similarity)
+    return run
+
+
 ChunkEmbedFn = Callable[
     [Any, Any, Dict[str, str], int, int],
     Tuple[List[str], torch.Tensor]

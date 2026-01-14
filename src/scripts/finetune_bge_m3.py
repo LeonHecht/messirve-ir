@@ -27,14 +27,14 @@ from config.config import STORAGE_DIR
     
 
 def finetune():
-    base_dir = os.path.join(STORAGE_DIR, "legal_ir", "data")
+    base_dir = os.path.join(STORAGE_DIR, "mtrag", "data")
     
     # train_ds_path = "bce_6x_summary_1024_baai.jsonl"
     # train_ds_path = "bce_6x_inpars_synthetic_baai.jsonl"
-    train_ds_path = "bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_train_baai.jsonl"
+    train_ds_path = "bge_finetune_6x_all_train_baai.jsonl"
     train_ds_path = os.path.join(base_dir, "datasets", "dual_encoder", train_ds_path)
 
-    output_dir = os.path.join(STORAGE_DIR, "legal_ir", "results", "baai_finetuning")
+    output_dir = os.path.join(STORAGE_DIR, "mtrag", "results", "baai_finetuning")
 
     run_name = "bge-train-v6"
 

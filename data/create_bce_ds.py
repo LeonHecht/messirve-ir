@@ -120,6 +120,14 @@ def _load_qrels(qrels_path: str, pos_labels: List[int], neg_labels: List[int]) -
     annotated_negs = df_q[df_q.label.isin(neg_labels)].groupby("qid")["doc_id"].apply(list).to_dict()
     return positives, annotated_negs
 
+def _load_qrels_mtrag(qrels_path: str, pos_labels: List[int], neg_labels: List[int]) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+    df_q = pd.read_csv(qrels_path, sep="\t", header=None, names=["qid", "doc_id", "label"])
+    df_q["qid"] = df_q["qid"].astype(str)
+    df_q["doc_id"] = df_q["doc_id"].astype(str)
+    positives = df_q[df_q.label.isin(pos_labels)].groupby("qid")["doc_id"].apply(list).to_dict()
+    annotated_negs = df_q[df_q.label.isin(neg_labels)].groupby("qid")["doc_id"].apply(list).to_dict()
+    return positives, annotated_negs
+
 
 def _load_queries(queries_path: str) -> Dict[str, str]:
     df = pd.read_csv(queries_path, sep="\t")
@@ -127,6 +135,14 @@ def _load_queries(queries_path: str) -> Dict[str, str]:
     df["id"] = df["id"].astype(str)
     return dict(zip(df["id"], df["query"]))
 
+def _load_queries_jsonl(queries_path: str) -> Dict[str, str]:
+    from typing import Dict
+    queries = {}
+    with open(queries_path, "r", encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            queries[str(obj["_id"])] = obj["text"]
+    return queries
 
 def build_ce_dataset_fast(
     qrels_path: str,
@@ -167,8 +183,8 @@ def build_ce_dataset_fast(
     doc_dict = {did: doc for did, doc in zip(doc_ids, docs)}
 
     # 0) Load supervision and queries
-    positives, annotated_negs = _load_qrels(qrels_path, pos_labels, neg_labels)
-    query_dict = _load_queries(queries_path)
+    positives, annotated_negs = _load_qrels_mtrag(qrels_path, pos_labels, neg_labels)
+    query_dict = _load_queries_jsonl(queries_path)
     if qid_filter:
         query_dict = {qid: q for qid, q in query_dict.items() if qid in qid_filter}
 
@@ -733,14 +749,14 @@ def main_create_scenario_datasets():
       S3: query‑wise split, only annotated negatives
       S4: query‑wise split, annotated + extras at 2× and 3×
     """
-    base = Path(STORAGE_DIR) / "legal_ir" / "data"
+    base = Path(STORAGE_DIR) / "mtrag" / "data"
     # ann  = base / "annotations" / "qrels_54.tsv"
-    ann  = base / "annotations" / "mistral_inpars_v2_corpus_NEW_qrels_corta_dedup_penal_mixed_1-1.tsv"
+    ann  = base / "annotations" / "all_qrels.tsv"
     # ann  = base / "annotations" / "inpars_mistral-small-2501_qrels_Q1.tsv"
     # corp = base / "corpus" / "corpus.jsonl"
-    corp = base / "corpus" / "corpus_NEW.jsonl"
+    corp = base / "corpus" / "all_corpus.jsonl"
     # qry  = base / "corpus" / "queries_54.tsv"
-    qry  = base / "corpus" / "mistral_inpars_v2_corpus_NEW_queries_corta_dedup_penal_mixed_1-1.tsv"
+    qry  = base / "questions" / "all_queries_rewrite.jsonl"
     out  = base / "datasets" / "dual_encoder"
     out.mkdir(parents=True, exist_ok=True)
 
@@ -749,9 +765,9 @@ def main_create_scenario_datasets():
     # train_qids = load_qids(base / "qids_train.txt")
     # dev_qids   = load_qids(base / "qids_dev.txt")
     # test_qids  = load_qids(base / "qids_test.txt")
-    train_qids = load_qids(base / "qids_inpars_v2_corta_dedup_penal_mixed_1-1_train.txt")
-    dev_qids   = load_qids(base / "qids_inpars_v2_corta_dedup_penal_mixed_1-1_dev.txt")
-    test_qids  = load_qids(base / "qids_inpars_v2_corta_dedup_penal_mixed_1-1_test.txt")
+    train_qids = load_qids(base / "qids_all_train.txt")
+    dev_qids   = load_qids(base / "qids_all_dev.txt")
+    test_qids  = load_qids(base / "qids_all_test.txt")
     for split_name, qids in [("train", train_qids), ("dev", dev_qids), ("test", test_qids)]:
         # build_ce_dataset(
         #     qrels_path=str(ann),
@@ -783,9 +799,9 @@ def main_create_scenario_datasets():
             neg_labels=[0],
             corpus_path=str(corp),
             queries_path=str(qry),
-            output_path=str(out / f"bge_finetune_12x_inpars_v2_corta_dedup_penal_mixed_1-1_{split_name}.tsv"),
+            output_path=str(out / f"bge_finetune_6x_all_{split_name}.tsv"),
             qid_filter=qids,
-            neg_ratio=12,
+            neg_ratio=6,
             seed=seed,
             # max_length=512,
             # stride=256,
